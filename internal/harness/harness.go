@@ -18,6 +18,8 @@ const defaultProviderConfigPath = "configs/providers.yaml"
 type Config struct {
 	// ProviderConfigPath 是 providers YAML 配置路径；为空时使用默认本地配置。
 	ProviderConfigPath string
+	// ProviderName 覆盖配置中的默认 Provider 实例名；为空时使用 llms.default_provider。
+	ProviderName string
 	// Logger 接收 Agent 内部日志；为空时使用 no-op logger。
 	Logger logger.Logger
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
@@ -49,10 +51,13 @@ func New(ctx context.Context, cfg Config) (*Harness, error) {
 		return nil, err
 	}
 
-	providerName := loaded.LLMs.DefaultProvider
+	providerName := cfg.ProviderName
+	if providerName == "" {
+		providerName = loaded.LLMs.DefaultProvider
+	}
 	providerConfig, ok := loaded.LLMs.Providers[providerName]
 	if !ok {
-		return nil, fmt.Errorf("unknown default provider %q", providerName)
+		return nil, fmt.Errorf("unknown provider %q", providerName)
 	}
 
 	llmRegistry := llms.NewRegistry()

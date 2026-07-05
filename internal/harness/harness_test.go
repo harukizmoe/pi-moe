@@ -77,6 +77,59 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 	}
 }
 
+func TestNewUsesProviderNameOverride(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: bad-default
+  providers:
+    bad-default:
+      type: does_not_exist
+      model: broken-model
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	h, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		ProviderName:       "fake-local",
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, err := h.Run(context.Background(), "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got == nil || got.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run().Answer = %#v, want %q", got, "13 * 7 = 91")
+	}
+}
+
+func TestNewReturnsErrorWhenProviderNameMissing(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	_, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		ProviderName:       "missing-provider",
+		Logger:             logger.NewNoop(),
+	})
+	if err == nil {
+		t.Fatal("New() error = nil, want unknown provider error")
+	}
+	if !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("New() error = %v, want unknown provider message", err)
+	}
+}
+
 func TestNewReturnsErrorWhenDefaultProviderMissing(t *testing.T) {
 	providerConfigPath := writeProvidersConfig(t, `llms:
   default_provider: missing-provider
@@ -91,10 +144,10 @@ func TestNewReturnsErrorWhenDefaultProviderMissing(t *testing.T) {
 		Logger:             logger.NewNoop(),
 	})
 	if err == nil {
-		t.Fatal("New() error = nil, want unknown default provider error")
+		t.Fatal("New() error = nil, want unknown provider error")
 	}
-	if !strings.Contains(err.Error(), "unknown default provider") {
-		t.Fatalf("New() error = %v, want unknown default provider message", err)
+	if !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("New() error = %v, want unknown provider message", err)
 	}
 }
 
