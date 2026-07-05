@@ -42,30 +42,11 @@ OMP 可借鉴的经验是分层：CLI/上层入口只表达用户意图；Provid
 - 不把真实 Provider smoke 写成依赖真实 API Key 的自动化测试。
 - 不改变 `internal/llms.Provider` 的最小 `Chat` 接口。
 
-## 方案选择
+## 设计决策
 
-### 方案 A：Harness-first provider override
+Provider override 放在 `internal/harness.Config.ProviderName`，而不是放在 CLI 装配逻辑里。Harness 继续负责配置读取、Provider registry、tool registry 和 Agent 构造；CLI 只解析 `--provider` 并传给 Harness。
 
-`internal/harness.Config` 增加 `ProviderName`。Harness 继续负责配置读取、Provider registry、tool registry 和 Agent 构造。CLI 只把 `--provider` 传给 Harness。
-
-优点：符合项目目标；后续 HTTP/business 入口可复用同一个 Harness；CLI 不复制装配逻辑。
-缺点：需要给 Harness 增加一个字段和少量错误分支。
-
-### 方案 B：CLI-centered provider selection
-
-CLI 直接读取配置、查找 provider、注册工具和构造 Agent。
-
-优点：短期实现直观。
-缺点：把 smoke driver 做成了主入口；后续 HTTP/business 入口还要再复制一遍装配逻辑。
-
-### 方案 C：只改 YAML default_provider
-
-用户通过编辑 `configs/providers.yaml` 切换 provider。
-
-优点：零代码。
-缺点：不适合反复 smoke；容易把本地临时选择提交进配置；不能覆盖未来业务入口的调用需求。
-
-选择：**方案 A**。
+这样后续 HTTP/API/business 入口可以复用同一个 Harness，不会把当前 smoke driver 变成事实上的主架构入口。
 
 ## Harness 设计
 
