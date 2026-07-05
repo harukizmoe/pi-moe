@@ -3,6 +3,7 @@ package llms
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,6 +163,43 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 	}
 	if resp.Message.ToolCalls[0].Function.Name != "calculator" {
 		t.Fatalf("tool name = %q", resp.Message.ToolCalls[0].Function.Name)
+	}
+}
+func TestOpenAICompatibleProviderPreservesEmptyToolContent(t *testing.T) {
+	var payload string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		payload = string(body)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+
+	_, err = provider.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleTool, ToolCallID: "call_empty", Content: ""}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	if !strings.Contains(payload, `"role":"tool"`) {
+		t.Fatalf("payload missing tool role: %s", payload)
+	}
+	if !strings.Contains(payload, `"tool_call_id":"call_empty"`) {
+		t.Fatalf("payload missing tool_call_id: %s", payload)
+	}
+	if !strings.Contains(payload, `"content":""`) {
+		t.Fatalf("payload missing empty content field: %s", payload)
 	}
 }
 

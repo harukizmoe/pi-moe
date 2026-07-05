@@ -27,8 +27,10 @@ type openAIChatRequest struct {
 }
 
 type openAIMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content 使用指针配合 omitempty，才能区分“字段缺失”和“显式空字符串”。
+	// 这样 tool result 的 Content == "" 仍会编码成 "content":""。
+	Content    *string          `json:"content,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
@@ -133,7 +135,7 @@ func toOpenAIMessages(messages []Message) []openAIMessage {
 	for _, msg := range messages {
 		out = append(out, openAIMessage{
 			Role:       string(msg.Role),
-			Content:    msg.Content,
+			Content:    openAIContent(msg.Content),
 			ToolCalls:  toOpenAIToolCalls(msg.ToolCalls),
 			ToolCallID: msg.ToolCallID,
 		})
@@ -182,7 +184,7 @@ func toOpenAIToolCalls(calls []ToolCall) []openAIToolCall {
 func fromOpenAIMessage(msg openAIMessage) Message {
 	return Message{
 		Role:       Role(msg.Role),
-		Content:    msg.Content,
+		Content:    fromOpenAIContent(msg.Content),
 		ToolCalls:  fromOpenAIToolCalls(msg.ToolCalls),
 		ToolCallID: msg.ToolCallID,
 	}
@@ -205,6 +207,16 @@ func fromOpenAIToolCalls(calls []openAIToolCall) []ToolCall {
 		})
 	}
 	return out
+}
+func openAIContent(content string) *string {
+	return &content
+}
+
+func fromOpenAIContent(content *string) string {
+	if content == nil {
+		return ""
+	}
+	return *content
 }
 
 func firstNonEmpty(values ...string) string {
