@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -21,6 +22,30 @@ func TestCalculatorDivideByZero(t *testing.T) {
 	_, err := tool.Call(context.Background(), `{"a":1,"b":0,"op":"div"}`)
 	if err == nil {
 		t.Fatal("Call() error = nil")
+	}
+}
+func TestCalculatorMissingRequiredArguments(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		wantErr   string
+	}{
+		{name: "missing a", arguments: `{"b":2,"op":"add"}`, wantErr: `missing required argument "a"`},
+		{name: "missing b", arguments: `{"a":1,"op":"div"}`, wantErr: `missing required argument "b"`},
+		{name: "missing op", arguments: `{"a":1,"b":2}`, wantErr: `missing required argument "op"`},
+	}
+
+	tool := Calculator{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tool.Call(context.Background(), tt.arguments)
+			if err == nil {
+				t.Fatal("Call() error = nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Call() error = %q, want substring %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -35,6 +35,16 @@ func (Calculator) Parameters() map[string]any {
 }
 
 func (Calculator) Call(ctx context.Context, arguments string) (string, error) {
+	var rawArgs map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(arguments), &rawArgs); err != nil {
+		return "", fmt.Errorf("decode calculator arguments: %w", err)
+	}
+	for _, required := range []string{"a", "b", "op"} {
+		if _, ok := rawArgs[required]; !ok {
+			return "", fmt.Errorf("missing required argument %q", required)
+		}
+	}
+
 	var args calculatorArgs
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", fmt.Errorf("decode calculator arguments: %w", err)

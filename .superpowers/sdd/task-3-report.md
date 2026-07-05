@@ -61,3 +61,67 @@ ok  	harukizmoe/pimoe/internal/tools	0.004s
 - `Registry.Schemas()` 直接复用 `internal/llms` 中的协议类型，符合 AGENT.md 的模块边界要求。
 - 错误路径覆盖了未知 tool、非法 JSON、除零、非法 op 等基础失败场景，其中本任务测试明确验证了除零和 registry 调用闭环。
 - 当前 `Schemas()` 迭代 map 的顺序不稳定，但本任务只注册一个工具，且验收只要求导出 calculator schema，因此当前实现满足需求且不引入额外复杂度。
+
+## Required arguments fix
+
+### RED evidence
+
+- Added `TestCalculatorMissingRequiredArguments` in `internal/tools/calculator_test.go`.
+- Command: `go test ./internal/tools -run TestCalculatorMissingRequiredArguments -v`
+- Failure output:
+
+```text
+=== RUN   TestCalculatorMissingRequiredArguments
+=== RUN   TestCalculatorMissingRequiredArguments/missing_a
+    calculator_test.go:43: Call() error = nil
+=== RUN   TestCalculatorMissingRequiredArguments/missing_b
+    calculator_test.go:46: Call() error = "divide by zero", want substring "missing required argument \"b\""
+=== RUN   TestCalculatorMissingRequiredArguments/missing_op
+    calculator_test.go:46: Call() error = "unsupported calculator op \"\"", want substring "missing required argument \"op\""
+--- FAIL: TestCalculatorMissingRequiredArguments (0.00s)
+    --- FAIL: TestCalculatorMissingRequiredArguments/missing_a (0.00s)
+    --- FAIL: TestCalculatorMissingRequiredArguments/missing_b (0.00s)
+    --- FAIL: TestCalculatorMissingRequiredArguments/missing_op (0.00s)
+FAIL
+FAIL    harukizmoe/pimoe/internal/tools    0.005s
+FAIL
+```
+
+### GREEN evidence
+
+- Implementation now rejects missing `a`, `b`, and `op` before decoding into zero values.
+- Focused command: `go test ./internal/tools -run TestCalculatorMissingRequiredArguments -v`
+
+```text
+=== RUN   TestCalculatorMissingRequiredArguments
+=== RUN   TestCalculatorMissingRequiredArguments/missing_a
+=== RUN   TestCalculatorMissingRequiredArguments/missing_b
+=== RUN   TestCalculatorMissingRequiredArguments/missing_op
+--- PASS: TestCalculatorMissingRequiredArguments (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_a (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_b (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_op (0.00s)
+PASS
+ok      harukizmoe/pimoe/internal/tools    0.003s
+```
+
+- Acceptance command: `go test ./internal/tools -v`
+
+```text
+=== RUN   TestCalculatorMul
+--- PASS: TestCalculatorMul (0.00s)
+=== RUN   TestCalculatorDivideByZero
+--- PASS: TestCalculatorDivideByZero (0.00s)
+=== RUN   TestCalculatorMissingRequiredArguments
+=== RUN   TestCalculatorMissingRequiredArguments/missing_a
+=== RUN   TestCalculatorMissingRequiredArguments/missing_b
+=== RUN   TestCalculatorMissingRequiredArguments/missing_op
+--- PASS: TestCalculatorMissingRequiredArguments (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_a (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_b (0.00s)
+    --- PASS: TestCalculatorMissingRequiredArguments/missing_op (0.00s)
+=== RUN   TestRegistrySchemasAndCall
+--- PASS: TestRegistrySchemasAndCall (0.00s)
+PASS
+ok      harukizmoe/pimoe/internal/tools    0.004s
+```
