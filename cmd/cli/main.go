@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/harness"
 	"harukizmoe/pimoe/internal/logger"
 )
@@ -43,7 +44,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println(result.Answer)
+	fmt.Print(formatRunResult(result, false))
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {
@@ -59,4 +60,30 @@ func readInput(args []string, stdin io.Reader) (string, error) {
 		return "", fmt.Errorf("empty input")
 	}
 	return input, nil
+}
+
+func formatRunResult(result *agent.RunResult, includeTrace bool) string {
+	if result == nil {
+		return ""
+	}
+
+	var out strings.Builder
+	out.WriteString(result.Answer)
+	out.WriteByte('\n')
+	if !includeTrace {
+		return out.String()
+	}
+
+	for _, step := range result.Steps {
+		fmt.Fprintf(&out, "tool=%s arguments=%s", step.ToolName, step.Arguments)
+		if step.Result != "" {
+			fmt.Fprintf(&out, " result=%s", step.Result)
+		}
+		if step.Error != "" {
+			fmt.Fprintf(&out, " error=%s", step.Error)
+		}
+		out.WriteByte('\n')
+	}
+
+	return out.String()
 }
