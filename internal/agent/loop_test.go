@@ -172,7 +172,60 @@ func TestAgentRunLogsToolCallingFlow(t *testing.T) {
 	}
 }
 
-func TestAgentRunRejectsSecondRoundToolCall(t *testing.T) {
+func TestAgentRunDefaultAllowsSecondRoundToolCall(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:      llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{calculatorToolCall("call_first_round", `{"a":13,"b":7,"op":"mul"}`)},
+			}}, nil
+		case 2:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:      llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{calculatorToolCall("call_second_round", `{"a":1,"b":2,"op":"add"}`)},
+			}}, nil
+		case 3:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "second round completed",
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	a := New(provider, registry, "fake-tool-model")
+	got, err := a.Run(context.Background(), "use calculator twice")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "second round completed" {
+		t.Fatalf("Run() answer = %q", got)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("chat requests len = %d", len(provider.requests))
+	}
+}
+
+func calculatorToolCall(id, arguments string) llms.ToolCall {
+	return llms.ToolCall{
+		ID:   id,
+		Type: "function",
+		Function: llms.ToolCallFunction{
+			Name:      "calculator",
+			Arguments: arguments,
+		},
+	}
+}
+
+func TestAgentRunSupportsMultipleToolRoundsWithinMaxSteps(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
@@ -183,27 +236,27 @@ func TestAgentRunRejectsSecondRoundToolCall(t *testing.T) {
 		case 1:
 			return &llms.ChatResponse{Message: llms.Message{
 				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{{
-					ID:   "call_first_round",
-					Type: "function",
-					Function: llms.ToolCallFunction{
-						Name:      "calculator",
-						Arguments: `{"a":13,"b":7,"op":"mul"}`,
-					},
-				}},
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
+				},
 			}}, nil
 		case 2:
+			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
+				t.Fatalf("second request last message = %#v, want tool result 5", got)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
+				},
+			}}, nil
+		case 3:
+			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "20" {
+				t.Fatalf("third request last message = %#v, want tool result 20", got)
+			}
 			return &llms.ChatResponse{Message: llms.Message{
 				Role:    llms.RoleAssistant,
-				Content: "second-round tool call should be rejected",
-				ToolCalls: []llms.ToolCall{{
-					ID:   "call_second_round",
-					Type: "function",
-					Function: llms.ToolCallFunction{
-						Name:      "calculator",
-						Arguments: `{"a":1,"b":2,"op":"add"}`,
-					},
-				}},
+				Content: "final answer: 20",
 			}}, nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
@@ -211,18 +264,101 @@ func TestAgentRunRejectsSecondRoundToolCall(t *testing.T) {
 		}
 	})}
 
-	a := New(provider, registry, "fake-tool-model")
-	got, err := a.Run(context.Background(), "use calculator twice")
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 2})
+	got, err := a.Run(context.Background(), "compute (2 + 3) * 4")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "final answer: 20" {
+		t.Fatalf("Run() answer = %q", got)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("chat requests len = %d", len(provider.requests))
+	}
+}
+
+func TestAgentRunReturnsMaxStepsErrorWhenToolLoopExceedsLimit(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
+				},
+			}}, nil
+		case 2:
+			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
+				t.Fatalf("second request last message = %#v, want tool result 5", got)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
+				},
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 1})
+	got, err := a.Run(context.Background(), "compute (2 + 3) * 4")
 	if err == nil {
-		t.Fatal("Run() error = nil, want explicit second-round tool call error")
+		t.Fatal("Run() error = nil, want max-steps error")
 	}
 	if got != "" {
 		t.Fatalf("Run() answer = %q, want empty string on error", got)
 	}
-	if !strings.Contains(err.Error(), "second tool-calling round") {
-		t.Fatalf("Run() error = %v, want second-round tool call message", err)
+	if !strings.Contains(err.Error(), "max steps") {
+		t.Fatalf("Run() error = %v, want max steps message", err)
 	}
 	if len(provider.requests) != 2 {
 		t.Fatalf("chat requests len = %d", len(provider.requests))
+	}
+}
+
+func TestAgentRunEmitsOrderedToolAndFinalEvents(t *testing.T) {
+	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
+	if err != nil {
+		t.Fatalf("NewFakeProvider() error = %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	var events []Event
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
+		MaxSteps: 1,
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	got, err := a.Run(context.Background(), "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "13 * 7 = 91" {
+		t.Fatalf("Run() answer = %q", got)
+	}
+
+	wantTypes := []EventType{EventToolCall, EventToolResult, EventFinal}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events len = %d, want %d", len(events), len(wantTypes))
+	}
+	for i, wantType := range wantTypes {
+		if events[i].Type != wantType {
+			t.Fatalf("event[%d].Type = %q, want %q", i, events[i].Type, wantType)
+		}
+	}
+	if events[len(events)-1].Message != got {
+		t.Fatalf("final event message = %q, want %q", events[len(events)-1].Message, got)
 	}
 }

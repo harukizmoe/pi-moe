@@ -6,6 +6,8 @@ type EventType string
 const (
 	// EventToolCall 表示模型已请求执行本地工具。
 	EventToolCall EventType = "tool_call"
+	// EventToolResult 表示本地工具已返回结果。
+	EventToolResult EventType = "tool_result"
 	// EventFinal 表示 Agent 已得到最终回答。
 	EventFinal EventType = "final"
 )
