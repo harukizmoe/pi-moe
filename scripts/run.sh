@@ -14,6 +14,11 @@ load_env_file() {
   fi
 }
 
+if [[ ! -f ".env" ]]; then
+  cp ".env.example" ".env"
+  echo "Created .env from .env.example; fill in API keys if you use real providers." >&2
+fi
+
 load_env_file ".env"
 load_env_file ".env.local"
 
