@@ -7,13 +7,22 @@ import (
 	"harukizmoe/pimoe/internal/llms"
 )
 
-// Run 执行一次有步数上限的 tool calling 主循环。
+// Run 执行一次有步数上限的 tool calling 主循环，并返回最终回答。
 func (a *Agent) Run(ctx context.Context, input string) (string, error) {
+	result, err := a.RunResult(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	return result.Answer, nil
+}
+
+// RunResult 执行一次有步数上限的 tool calling 主循环，并返回结构化 trace。
+func (a *Agent) RunResult(ctx context.Context, input string) (*RunResult, error) {
+	result := &RunResult{}
 	messages := []llms.Message{{Role: llms.RoleUser, Content: input}}
 	toolSchemas := a.tools.Schemas()
 
 	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", input)
-	toolRounds := 0
 	for chatRound := 0; ; chatRound++ {
 		a.logLLMRequest(ctx, chatRound, len(messages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
@@ -23,19 +32,20 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 		})
 		if err != nil {
 			a.logLLMError(ctx, chatRound, err)
-			return "", fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
+			return result, fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
 		}
 
 		assistantMessage := response.Message
 		if len(assistantMessage.ToolCalls) == 0 {
+			result.Answer = assistantMessage.Content
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
 			a.emit(Event{Type: EventFinal, Message: assistantMessage.Content})
-			return assistantMessage.Content, nil
+			return result, nil
 		}
 
-		if toolRounds >= a.maxSteps {
+		if result.ToolRounds >= a.maxSteps {
 			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
-			return "", fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)
+			return result, fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)
 		}
 
 		a.logger.Info(ctx, "agent.tool_calls.received", "count", len(assistantMessage.ToolCalls))
@@ -44,17 +54,22 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "arguments", call.Function.Arguments)
 			a.emit(Event{Type: EventToolCall, Message: call.Function.Name})
 
+			step := Step{ToolCallID: call.ID, ToolName: call.Function.Name, Arguments: call.Function.Arguments}
 			toolMessage, err := a.runToolCall(ctx, call)
 			if err != nil {
+				step.Error = err.Error()
+				result.Steps = append(result.Steps, step)
 				a.logger.Error(ctx, "agent.tool.error", "name", call.Function.Name, "error", err)
-				return "", err
+				return result, err
 			}
 
+			step.Result = toolMessage.Content
+			result.Steps = append(result.Steps, step)
 			a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content})
 			messages = append(messages, toolMessage)
 		}
-		toolRounds++
+		result.ToolRounds++
 	}
 }
 

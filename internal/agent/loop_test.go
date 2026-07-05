@@ -362,3 +362,174 @@ func TestAgentRunEmitsOrderedToolAndFinalEvents(t *testing.T) {
 		t.Fatalf("final event message = %q, want %q", events[len(events)-1].Message, got)
 	}
 }
+
+func TestAgentRunResultReturnsAnswerWithoutToolCalls(t *testing.T) {
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		return &llms.ChatResponse{Message: llms.Message{
+			Role:    llms.RoleAssistant,
+			Content: "done without tools",
+		}}, nil
+	})}
+
+	a := New(provider, tools.NewRegistry(), "fake-tool-model")
+	got, err := a.RunResult(context.Background(), "just answer directly")
+	if err != nil {
+		t.Fatalf("RunResult() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("RunResult() result = nil")
+	}
+	if got.Answer != "done without tools" {
+		t.Fatalf("RunResult().Answer = %q", got.Answer)
+	}
+	if got.ToolRounds != 0 {
+		t.Fatalf("RunResult().ToolRounds = %d, want 0", got.ToolRounds)
+	}
+	if len(got.Steps) != 0 {
+		t.Fatalf("RunResult().Steps len = %d, want 0", len(got.Steps))
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("chat requests len = %d, want 1", len(provider.requests))
+	}
+}
+
+func TestAgentRunResultRecordsToolTraceAcrossRounds(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
+				},
+			}}, nil
+		case 2:
+			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
+				t.Fatalf("second request last message = %#v, want tool result 5", got)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
+				},
+			}}, nil
+		case 3:
+			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "20" {
+				t.Fatalf("third request last message = %#v, want tool result 20", got)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "final answer: 20",
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 2})
+	got, err := a.RunResult(context.Background(), "compute (2 + 3) * 4")
+	if err != nil {
+		t.Fatalf("RunResult() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("RunResult() result = nil")
+	}
+	if got.Answer != "final answer: 20" {
+		t.Fatalf("RunResult().Answer = %q", got.Answer)
+	}
+	if got.ToolRounds != 2 {
+		t.Fatalf("RunResult().ToolRounds = %d, want 2", got.ToolRounds)
+	}
+	if len(got.Steps) != 2 {
+		t.Fatalf("RunResult().Steps len = %d, want 2", len(got.Steps))
+	}
+
+	step1 := got.Steps[0]
+	if step1.ToolCallID != "call_step_1" {
+		t.Fatalf("RunResult().Steps[0].ToolCallID = %q", step1.ToolCallID)
+	}
+	if step1.ToolName != "calculator" {
+		t.Fatalf("RunResult().Steps[0].ToolName = %q", step1.ToolName)
+	}
+	if step1.Arguments != `{"a":2,"b":3,"op":"add"}` {
+		t.Fatalf("RunResult().Steps[0].Arguments = %q", step1.Arguments)
+	}
+	if step1.Result != "5" {
+		t.Fatalf("RunResult().Steps[0].Result = %q", step1.Result)
+	}
+	if step1.Error != "" {
+		t.Fatalf("RunResult().Steps[0].Error = %q, want empty", step1.Error)
+	}
+
+	step2 := got.Steps[1]
+	if step2.ToolCallID != "call_step_2" {
+		t.Fatalf("RunResult().Steps[1].ToolCallID = %q", step2.ToolCallID)
+	}
+	if step2.ToolName != "calculator" {
+		t.Fatalf("RunResult().Steps[1].ToolName = %q", step2.ToolName)
+	}
+	if step2.Arguments != `{"a":5,"b":4,"op":"mul"}` {
+		t.Fatalf("RunResult().Steps[1].Arguments = %q", step2.Arguments)
+	}
+	if step2.Result != "20" {
+		t.Fatalf("RunResult().Steps[1].Result = %q", step2.Result)
+	}
+	if step2.Error != "" {
+		t.Fatalf("RunResult().Steps[1].Error = %q, want empty", step2.Error)
+	}
+}
+
+func TestAgentRunResultReturnsTraceWhenToolFails(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		return &llms.ChatResponse{Message: llms.Message{
+			Role: llms.RoleAssistant,
+			ToolCalls: []llms.ToolCall{
+				calculatorToolCall("call_bad_args", `{"a":1`),
+			},
+		}}, nil
+	})}
+
+	a := New(provider, registry, "fake-tool-model")
+	got, err := a.RunResult(context.Background(), "try calculator with bad arguments")
+	if err == nil {
+		t.Fatal("RunResult() error = nil, want tool error")
+	}
+	if got == nil {
+		t.Fatal("RunResult() result = nil, want failed step trace")
+	}
+	if len(got.Steps) != 1 {
+		t.Fatalf("RunResult().Steps len = %d, want 1", len(got.Steps))
+	}
+
+	step := got.Steps[0]
+	if step.ToolCallID != "call_bad_args" {
+		t.Fatalf("RunResult().Steps[0].ToolCallID = %q", step.ToolCallID)
+	}
+	if step.ToolName != "calculator" {
+		t.Fatalf("RunResult().Steps[0].ToolName = %q", step.ToolName)
+	}
+	if step.Arguments != `{"a":1` {
+		t.Fatalf("RunResult().Steps[0].Arguments = %q", step.Arguments)
+	}
+	if step.Result != "" {
+		t.Fatalf("RunResult().Steps[0].Result = %q, want empty", step.Result)
+	}
+	if step.Error == "" {
+		t.Fatal("RunResult().Steps[0].Error = empty, want tool failure")
+	}
+	if !strings.Contains(step.Error, "decode calculator arguments") {
+		t.Fatalf("RunResult().Steps[0].Error = %q, want calculator decode failure", step.Error)
+	}
+	if !strings.Contains(err.Error(), "call tool \"calculator\"") {
+		t.Fatalf("RunResult() error = %v, want calculator tool failure", err)
+	}
+}
