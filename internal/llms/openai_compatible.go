@@ -5,12 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
 
-const defaultOpenAICompatibleTimeout = 60
+const (
+	defaultOpenAICompatibleTimeout = 60
+	maxOpenAIErrorBodyBytes        = 4096
+)
 
 // OpenAICompatibleProvider 负责把标准化 llms 请求转换到 OpenAI-compatible /chat/completions。
 type OpenAICompatibleProvider struct {
@@ -110,9 +114,17 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (*
 	}
 	defer resp.Body.Close()
 
-	// Provider 只验证协议边界，任何非 2xx 都直接上抛给调用方处理。
+	// Provider 只验证协议边界；非 2xx 保留有限响应体，便于定位上游错误但避免无限读取。
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("openai chat returned status %d", resp.StatusCode)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOpenAIErrorBodyBytes))
+		if readErr != nil {
+			return nil, fmt.Errorf("openai chat returned status %d and failed to read error body: %w", resp.StatusCode, readErr)
+		}
+		bodyText := strings.TrimSpace(string(body))
+		if bodyText == "" {
+			return nil, fmt.Errorf("openai chat returned status %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
 	}
 
 	var decoded openAIChatResponse
@@ -197,9 +209,13 @@ func fromOpenAIToolCalls(calls []openAIToolCall) []ToolCall {
 
 	out := make([]ToolCall, 0, len(calls))
 	for _, call := range calls {
+		callType := call.Type
+		if callType == "" {
+			callType = "function"
+		}
 		out = append(out, ToolCall{
 			ID:   call.ID,
-			Type: call.Type,
+			Type: callType,
 			Function: ToolCallFunction{
 				Name:      call.Function.Name,
 				Arguments: call.Function.Arguments,
@@ -208,6 +224,7 @@ func fromOpenAIToolCalls(calls []openAIToolCall) []ToolCall {
 	}
 	return out
 }
+
 func openAIContent(content string) *string {
 	return &content
 }

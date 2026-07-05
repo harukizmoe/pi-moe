@@ -3,6 +3,7 @@ package llms
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -203,9 +204,11 @@ func TestOpenAICompatibleProviderPreservesEmptyToolContent(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleProviderReturnsStatusError(t *testing.T) {
+func TestOpenAICompatibleProviderStatusErrorIncludesBodyExcerpt(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusBadGateway)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream exploded","request_id":"req_123"}}`))
 	}))
 	defer server.Close()
 
@@ -218,8 +221,89 @@ func TestOpenAICompatibleProviderReturnsStatusError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Chat() error = nil")
 	}
-	if !strings.Contains(err.Error(), "status 502") {
-		t.Fatalf("error = %v", err)
+	if !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error missing status: %v", err)
+	}
+	if !strings.Contains(err.Error(), "upstream exploded") {
+		t.Fatalf("error missing body excerpt: %v", err)
+	}
+}
+
+func TestOpenAICompatibleProviderReturnsDecodeErrorOnMalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":]}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+
+	_, err = provider.Chat(context.Background(), ChatRequest{})
+	if err == nil {
+		t.Fatal("Chat() error = nil")
+	}
+	if !strings.Contains(err.Error(), "decode openai chat response") {
+		t.Fatalf("error missing decode context: %v", err)
+	}
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("error missing wrapped syntax error: %v", err)
+	}
+}
+
+func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices": [
+				{
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{
+								"id": "call_1",
+								"function": {
+									"name": "calculator",
+									"arguments": "{\"a\":13,\"b\":7,\"op\":\"mul\"}"
+								}
+							}
+						]
+					}
+				}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+
+	resp, err := provider.Chat(context.Background(), ChatRequest{})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls len = %d", len(resp.Message.ToolCalls))
+	}
+	if resp.Message.ToolCalls[0].Type != "function" {
+		t.Fatalf("tool call type = %q", resp.Message.ToolCalls[0].Type)
+	}
+	if resp.Message.ToolCalls[0].Function.Name != "calculator" {
+		t.Fatalf("tool name = %q", resp.Message.ToolCalls[0].Function.Name)
+	}
+	if resp.Message.ToolCalls[0].Function.Arguments != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("tool arguments = %q", resp.Message.ToolCalls[0].Function.Arguments)
+	}
+	if resp.Message.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool call id = %q", resp.Message.ToolCalls[0].ID)
+	}
+	if resp.Message.Role != RoleAssistant {
+		t.Fatalf("response role = %q", resp.Message.Role)
 	}
 }
 
