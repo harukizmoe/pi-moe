@@ -78,10 +78,21 @@ func New(ctx context.Context, cfg Config) (*Harness, error) {
 
 // Run 执行一次 Agent 运行，并返回结构化结果。
 func (h *Harness) Run(ctx context.Context, input string) (*agent.RunResult, error) {
-	input = strings.TrimSpace(input)
-	if input == "" {
+	return h.RunMessages(ctx, []llms.Message{{Role: llms.RoleUser, Content: input}})
+}
+
+// RunMessages 从调用方提供的无状态对话历史继续执行 Agent。
+func (h *Harness) RunMessages(ctx context.Context, messages []llms.Message) (*agent.RunResult, error) {
+	if len(messages) == 0 {
 		return nil, fmt.Errorf("empty input")
 	}
 
-	return h.agent.RunResult(ctx, input)
+	messages = append([]llms.Message(nil), messages...)
+	lastIndex := len(messages) - 1
+	messages[lastIndex].Content = strings.TrimSpace(messages[lastIndex].Content)
+	if messages[lastIndex].Role == llms.RoleUser && messages[lastIndex].Content == "" {
+		return nil, fmt.Errorf("empty input")
+	}
+
+	return h.agent.RunMessages(ctx, messages)
 }

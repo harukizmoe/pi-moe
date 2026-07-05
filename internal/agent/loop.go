@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"harukizmoe/pimoe/internal/llms"
 )
@@ -18,11 +19,24 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 
 // RunResult 执行一次有步数上限的 tool calling 主循环，并返回结构化 trace。
 func (a *Agent) RunResult(ctx context.Context, input string) (*RunResult, error) {
+	return a.RunMessages(ctx, []llms.Message{{Role: llms.RoleUser, Content: input}})
+}
+
+// RunMessages 从调用方提供的无状态对话历史继续执行 tool calling 主循环。
+func (a *Agent) RunMessages(ctx context.Context, messages []llms.Message) (*RunResult, error) {
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("messages must not be empty")
+	}
+	lastMessage := messages[len(messages)-1]
+	if lastMessage.Role != llms.RoleUser || strings.TrimSpace(lastMessage.Content) == "" {
+		return nil, fmt.Errorf("last message must be a non-empty user message")
+	}
+
 	result := &RunResult{}
-	messages := []llms.Message{{Role: llms.RoleUser, Content: input}}
+	messages = append([]llms.Message(nil), messages...)
 	toolSchemas := a.tools.Schemas()
 
-	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", input)
+	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", lastMessage.Content)
 	for chatRound := 0; ; chatRound++ {
 		a.logLLMRequest(ctx, chatRound, len(messages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
