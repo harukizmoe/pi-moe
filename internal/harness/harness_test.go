@@ -242,6 +242,59 @@ func TestRunMatchesRunMessagesForSingleUserInput(t *testing.T) {
 	}
 }
 
+func TestRunAgentMessagesRejectsEmptyFinalUserMessageAfterTrim(t *testing.T) {
+	h := newFakeHarness(t)
+
+	tests := []struct {
+		name     string
+		messages []agent.Message
+	}{
+		{
+			name: "whitespace only user",
+			messages: []agent.Message{
+				agent.UserMessage{Content: " \n\t "},
+			},
+		},
+		{
+			name: "history ending with whitespace user",
+			messages: []agent.Message{
+				agent.AssistantMessage{Content: "Need anything else?"},
+				agent.UserMessage{Content: "   \t"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.RunAgentMessages(context.Background(), tt.messages)
+			if err == nil {
+				t.Fatal("RunAgentMessages() error = nil, want empty input error")
+			}
+			if !strings.Contains(err.Error(), "empty input") {
+				t.Fatalf("RunAgentMessages() error = %v, want empty input message", err)
+			}
+		})
+	}
+}
+
+func TestRunAgentMessagesContinuesHistoryEndingWithUserMessage(t *testing.T) {
+	h := newFakeHarness(t)
+
+	got, err := h.RunAgentMessages(context.Background(), []agent.Message{
+		agent.AssistantMessage{Content: "Let's continue from the earlier steps."},
+		agent.UserMessage{Content: "  use calculator to compute 13 * 7  "},
+	})
+	if err != nil {
+		t.Fatalf("RunAgentMessages() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("RunAgentMessages() result = nil")
+	}
+	if got.Answer != "13 * 7 = 91" {
+		t.Fatalf("RunAgentMessages().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
+	}
+}
+
 func newFakeHarness(t *testing.T) *Harness {
 	t.Helper()
 
