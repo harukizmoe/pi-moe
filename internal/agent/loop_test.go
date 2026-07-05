@@ -42,6 +42,31 @@ func (f chatFunc) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatRes
 	return f(ctx, req)
 }
 
+type recordingLogger struct {
+	messages []string
+}
+
+func (l *recordingLogger) Debug(ctx context.Context, msg string, attrs ...any) {
+	l.messages = append(l.messages, msg)
+}
+
+func (l *recordingLogger) Info(ctx context.Context, msg string, attrs ...any) {
+	l.messages = append(l.messages, msg)
+}
+
+func (l *recordingLogger) Error(ctx context.Context, msg string, attrs ...any) {
+	l.messages = append(l.messages, msg)
+}
+
+func (l *recordingLogger) contains(msg string) bool {
+	for _, got := range l.messages {
+		if got == msg {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAgentRunExecutesToolCall(t *testing.T) {
 	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
 	if err != nil {
@@ -110,6 +135,40 @@ func TestAgentRunExecutesToolCall(t *testing.T) {
 	}
 	if toolMessage.Content != "91" {
 		t.Fatalf("tool content = %q", toolMessage.Content)
+	}
+}
+
+func TestAgentRunLogsToolCallingFlow(t *testing.T) {
+	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
+	if err != nil {
+		t.Fatalf("NewFakeProvider() error = %v", err)
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+	log := &recordingLogger{}
+
+	a := NewWithLogger(provider, registry, "fake-tool-model", log)
+	got, err := a.Run(context.Background(), "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "13 * 7 = 91" {
+		t.Fatalf("answer = %q", got)
+	}
+
+	for _, want := range []string{
+		"agent.run.start",
+		"agent.llm.first.request",
+		"agent.tool_calls.received",
+		"agent.tool.call",
+		"agent.tool.result",
+		"agent.llm.final.request",
+		"agent.run.done",
+	} {
+		if !log.contains(want) {
+			t.Fatalf("logged messages = %v, want %q", log.messages, want)
+		}
 	}
 }
 

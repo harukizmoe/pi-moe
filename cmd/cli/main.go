@@ -8,10 +8,23 @@ import (
 	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/llms"
+	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/tools"
 )
 
+const agentLogPath = ".moe/logs/agent.log"
+
 func main() {
+	appLogger, closeLogger, err := logger.NewDevelopmentFile(agentLogPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := closeLogger(); err != nil {
+			log.Printf("close logger: %v", err)
+		}
+	}()
+
 	cfg, err := config.Load("configs/providers.yaml")
 	if err != nil {
 		log.Fatal(err)
@@ -37,7 +50,7 @@ func main() {
 	// 当前 CLI 只接 calculator，用于验证完整的 tool calling 最小闭环。
 	toolRegistry.Register(tools.Calculator{})
 
-	a := agent.New(provider, toolRegistry, providerConfig.Model)
+	a := agent.NewWithLogger(provider, toolRegistry, providerConfig.Model, appLogger)
 	answer, err := a.Run(context.Background(), "use calculator to compute 13 * 7")
 	if err != nil {
 		log.Fatal(err)
