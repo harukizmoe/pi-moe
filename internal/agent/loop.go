@@ -43,6 +43,10 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("final llm chat: %w", err)
 	}
+	if len(final.Message.ToolCalls) > 0 {
+		// 第二次对话必须直接给出最终答案；如果再次请求工具，说明模型试图进入当前实现不支持的第二轮 tool calling。
+		return "", fmt.Errorf("final llm chat requested unsupported second tool-calling round (%d tool calls)", len(final.Message.ToolCalls))
+	}
 
 	return final.Message.Content, nil
 }

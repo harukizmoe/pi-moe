@@ -67,3 +67,44 @@ ok  	harukizmoe/pimoe/internal/agent	0.003s
 - `internal/agent` 仅依赖 `llms.Provider` 与 `tools.Registry`，符合模块边界要求，没有泄漏 provider-specific HTTP 细节。
 - 当前实现故意只支持“一轮 tool calling + 最终回答”的最小闭环；若后续要支持多轮递归、流式输出或事件广播，应在此基础上扩展，但本任务未提前引入额外抽象。
 - 测试是 focused 闭环验证，只运行 Task 4 验收命令，符合“只跑最小可证明测试”的约束。
+
+## Task 4 修复补充：拒绝第二轮 Tool Call
+
+### RED 证据
+
+- 命令：`go test ./internal/agent -run 'TestAgentRunExecutesToolCall|TestAgentRunRejectsSecondRoundToolCall' -v`
+- 失败输出：
+
+```text
+=== RUN   TestAgentRunExecutesToolCall
+--- PASS: TestAgentRunExecutesToolCall (0.00s)
+=== RUN   TestAgentRunRejectsSecondRoundToolCall
+    loop_test.go:158: Run() error = nil, want explicit second-round tool call error
+--- FAIL: TestAgentRunRejectsSecondRoundToolCall (0.00s)
+FAIL
+FAIL	harukizmoe/pimoe/internal/agent	0.004s
+FAIL
+```
+
+- 结论：第二次 `provider.Chat` 返回 `ToolCalls` 时，`Agent.Run` 直接返回了 `final.Message.Content`，没有显式拒绝不支持的第二轮 tool calling。
+
+### GREEN 证据
+
+- 修复：`internal/agent/loop.go` 在第二次 chat 后新增 `final.Message.ToolCalls` 分支校验，只要模型再次请求工具就返回明确错误。
+- 命令：`go test ./internal/agent -run 'TestAgentRunExecutesToolCall|TestAgentRunRejectsSecondRoundToolCall' -v`
+- 通过输出：
+
+```text
+=== RUN   TestAgentRunExecutesToolCall
+--- PASS: TestAgentRunExecutesToolCall (0.00s)
+=== RUN   TestAgentRunRejectsSecondRoundToolCall
+--- PASS: TestAgentRunRejectsSecondRoundToolCall (0.00s)
+PASS
+ok  	harukizmoe/pimoe/internal/agent	(cached)
+```
+
+### 本次变更文件
+
+- `internal/agent/loop.go`
+- `internal/agent/loop_test.go`
+- `.superpowers/sdd/task-4-report.md`

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"harukizmoe/pimoe/internal/llms"
@@ -33,6 +34,12 @@ func (p *recordingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*ll
 	p.requests = append(p.requests, copied)
 
 	return p.inner.Chat(ctx, req)
+}
+
+type chatFunc func(context.Context, llms.ChatRequest) (*llms.ChatResponse, error)
+
+func (f chatFunc) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	return f(ctx, req)
 }
 
 func TestAgentRunExecutesToolCall(t *testing.T) {
@@ -103,5 +110,60 @@ func TestAgentRunExecutesToolCall(t *testing.T) {
 	}
 	if toolMessage.Content != "91" {
 		t.Fatalf("tool content = %q", toolMessage.Content)
+	}
+}
+
+func TestAgentRunRejectsSecondRoundToolCall(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{{
+					ID:   "call_first_round",
+					Type: "function",
+					Function: llms.ToolCallFunction{
+						Name:      "calculator",
+						Arguments: `{"a":13,"b":7,"op":"mul"}`,
+					},
+				}},
+			}}, nil
+		case 2:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "second-round tool call should be rejected",
+				ToolCalls: []llms.ToolCall{{
+					ID:   "call_second_round",
+					Type: "function",
+					Function: llms.ToolCallFunction{
+						Name:      "calculator",
+						Arguments: `{"a":1,"b":2,"op":"add"}`,
+					},
+				}},
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	a := New(provider, registry, "fake-tool-model")
+	got, err := a.Run(context.Background(), "use calculator twice")
+	if err == nil {
+		t.Fatal("Run() error = nil, want explicit second-round tool call error")
+	}
+	if got != "" {
+		t.Fatalf("Run() answer = %q, want empty string on error", got)
+	}
+	if !strings.Contains(err.Error(), "second tool-calling round") {
+		t.Fatalf("Run() error = %v, want second-round tool call message", err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("chat requests len = %d", len(provider.requests))
 	}
 }
