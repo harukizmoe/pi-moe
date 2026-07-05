@@ -97,14 +97,13 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 				step.Error = err.Error()
 				result.Steps = append(result.Steps, step)
 				a.logger.Error(ctx, "agent.tool.error", "name", call.Function.Name, "error", err)
-				return result, err
+			} else {
+				step.Result = toolMessage.Content
+				result.Steps = append(result.Steps, step)
+				a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			}
-
-			step.Result = toolMessage.Content
-			result.Steps = append(result.Steps, step)
-			a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content})
-			messages = append(messages, ToolResultMessage{ToolCallID: toolMessage.ToolCallID, ToolName: call.Function.Name, Content: toolMessage.Content})
+			messages = append(messages, toolMessage)
 		}
 		result.ToolRounds++
 	}

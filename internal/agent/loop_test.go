@@ -574,52 +574,129 @@ func TestAgentRunResultRecordsToolTraceAcrossRounds(t *testing.T) {
 	}
 }
 
-func TestAgentRunResultReturnsTraceWhenToolFails(t *testing.T) {
+func TestAgentRunAgentMessagesContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
+	round := 0
 	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role: llms.RoleAssistant,
-			ToolCalls: []llms.ToolCall{
-				calculatorToolCall("call_bad_args", `{"a":1`),
-			},
-		}}, nil
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_bad_args", `{"a":1`),
+				},
+			}}, nil
+		case 2:
+			got := req.Messages[len(req.Messages)-1]
+			if got.Role != llms.RoleTool {
+				t.Fatalf("second request last role = %q, want tool", got.Role)
+			}
+			if got.ToolCallID != "call_bad_args" {
+				t.Fatalf("second request ToolCallID = %q, want call_bad_args", got.ToolCallID)
+			}
+			if !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
+				t.Fatalf("second request tool content = %q, want sanitized failure summary", got.Content)
+			}
+			if !strings.Contains(got.Content, "decode calculator arguments") {
+				t.Fatalf("second request tool content = %q, want calculator decode context", got.Content)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "I couldn't use calculator because the arguments were malformed.",
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
 	})}
 
 	a := New(provider, registry, "fake-tool-model")
-	got, err := a.RunResult(context.Background(), "try calculator with bad arguments")
-	if err == nil {
-		t.Fatal("RunResult() error = nil, want tool error")
+	got, err := runAgentMessages(t, a, context.Background(), []Message{
+		UserMessage{Content: "try calculator with bad arguments"},
+	})
+	if err != nil {
+		t.Fatalf("RunAgentMessages() error = %v", err)
 	}
 	if got == nil {
-		t.Fatal("RunResult() result = nil, want failed step trace")
+		t.Fatal("RunAgentMessages() result = nil")
+	}
+	if got.Answer != "I couldn't use calculator because the arguments were malformed." {
+		t.Fatalf("RunAgentMessages().Answer = %q", got.Answer)
+	}
+	if got.ToolRounds != 1 {
+		t.Fatalf("RunAgentMessages().ToolRounds = %d, want 1", got.ToolRounds)
 	}
 	if len(got.Steps) != 1 {
-		t.Fatalf("RunResult().Steps len = %d, want 1", len(got.Steps))
+		t.Fatalf("RunAgentMessages().Steps len = %d, want 1", len(got.Steps))
 	}
-
 	step := got.Steps[0]
-	if step.ToolCallID != "call_bad_args" {
-		t.Fatalf("RunResult().Steps[0].ToolCallID = %q", step.ToolCallID)
-	}
-	if step.ToolName != "calculator" {
-		t.Fatalf("RunResult().Steps[0].ToolName = %q", step.ToolName)
-	}
-	if step.Arguments != `{"a":1` {
-		t.Fatalf("RunResult().Steps[0].Arguments = %q", step.Arguments)
-	}
 	if step.Result != "" {
-		t.Fatalf("RunResult().Steps[0].Result = %q, want empty", step.Result)
+		t.Fatalf("RunAgentMessages().Steps[0].Result = %q, want empty", step.Result)
 	}
-	if step.Error == "" {
-		t.Fatal("RunResult().Steps[0].Error = empty, want tool failure")
+	if step.Error == "" || !strings.Contains(step.Error, "decode calculator arguments") {
+		t.Fatalf("RunAgentMessages().Steps[0].Error = %q, want calculator decode failure", step.Error)
 	}
-	if !strings.Contains(step.Error, "decode calculator arguments") {
-		t.Fatalf("RunResult().Steps[0].Error = %q, want calculator decode failure", step.Error)
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests len = %d, want 2", len(provider.requests))
 	}
-	if !strings.Contains(err.Error(), "call tool \"calculator\"") {
-		t.Fatalf("RunResult() error = %v, want calculator tool failure", err)
+}
+
+func TestAgentRunAgentMessagesReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_bad_args", `{"a":1`),
+				},
+			}}, nil
+		case 2:
+			got := req.Messages[len(req.Messages)-1]
+			if got.Role != llms.RoleTool || !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
+				t.Fatalf("second request last message = %#v, want sanitized tool failure", got)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_retry", `{"a":1`),
+				},
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 1})
+	got, err := runAgentMessages(t, a, context.Background(), []Message{
+		UserMessage{Content: "keep trying even after tool failure"},
+	})
+	if err == nil {
+		t.Fatal("RunAgentMessages() error = nil, want max steps error")
+	}
+	if !strings.Contains(err.Error(), "max steps") {
+		t.Fatalf("RunAgentMessages() error = %v, want max steps message", err)
+	}
+	if got == nil {
+		t.Fatal("RunAgentMessages() result = nil, want retained step trace")
+	}
+	if got.ToolRounds != 1 {
+		t.Fatalf("RunAgentMessages().ToolRounds = %d, want 1", got.ToolRounds)
+	}
+	if len(got.Steps) != 1 {
+		t.Fatalf("RunAgentMessages().Steps len = %d, want 1", len(got.Steps))
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests len = %d, want 2", len(provider.requests))
 	}
 }
 
