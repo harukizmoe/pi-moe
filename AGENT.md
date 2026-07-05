@@ -23,6 +23,7 @@
 - `internal/agent` 只负责 Agent 主循环和 tool calling 流程，不处理配置读取、HTTP 路由或具体 Provider HTTP 细节。
 - `internal/tools` 只负责工具接口、工具注册、schema 暴露和工具执行。
 - `internal/config` 负责 Viper 读取 YAML 和环境变量；其他业务包不直接依赖 Viper。
+- `internal/logger` 负责统一日志接口和开发期输出；业务包通过接口注入，不直接操作 `slog`。
 - `internal/application` 保留给后续 HTTP/business 入口；CLI 闭环跑通前不要扩展 router、middleware、data。
 
 ## 配置约定
@@ -31,12 +32,17 @@
 - Provider 实例名和实现类型分开：例如 `deepseek` 是实例名，`type: openai_compatible` 是实现类型。
 - API Key 使用 `api_key_env` 指向环境变量，不在 YAML 中保存真实密钥，也不依赖 `${ENV}` 字符串展开。
 
-## 当前优先级
+## 日志约定
 
-1. 用 CLI 跑通 `config -> llms -> agent -> tools -> final answer`。
-2. 先支持 fake provider 的确定性 tool call 测试。
-3. 再接 OpenAI-compatible `/v1/chat/completions`。
-4. 最后再考虑 HTTP API、数据库、memory、streaming、Responses API。
+- 开发期日志使用 `internal/logger`，CLI 默认写入 stderr 和 `.moe/logs/agent.log`。
+- Agent 记录阶段事件：run start/done、LLM request/error、tool call/result。
+- 日志不能写入 API Key、完整密钥配置或不必要的用户隐私内容。
+
+## 开发顺序
+
+1. 先保证 CLI + fake provider 的确定性 tool-calling 闭环。
+2. Provider 适配只处理协议转换、错误映射和响应规范化。
+3. HTTP API、数据库、memory、streaming、Responses API 后置。
 
 ## 验证要求
 
