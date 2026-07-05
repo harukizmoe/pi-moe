@@ -196,4 +196,6 @@ fabric.properties
 .superpowers
 configs/providers.yaml
 .moe
+.env
+.env.local
 docs
