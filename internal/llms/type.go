@@ -1,79 +1,79 @@
 package llms
 
-// Role is the normalized chat message role used across all LLM providers.
+// Role 是所有 LLM Provider 共用的标准化聊天消息角色。
 type Role string
 
 const (
-	// RoleSystem carries system-level instructions.
+	// RoleSystem 承载系统级指令。
 	RoleSystem Role = "system"
-	// RoleUser carries user input.
+	// RoleUser 承载用户输入。
 	RoleUser Role = "user"
-	// RoleAssistant carries model responses, including tool calls.
+	// RoleAssistant 承载模型响应，包括 tool call。
 	RoleAssistant Role = "assistant"
-	// RoleTool carries local tool results returned to the model.
+	// RoleTool 承载返回给模型的本地工具结果。
 	RoleTool Role = "tool"
 )
 
-// ChatRequest is the provider-neutral request shape used by the agent layer.
+// ChatRequest 是 agent 层使用的 Provider 无关请求结构。
 type ChatRequest struct {
-	// Model overrides the provider default model when non-empty.
+	// Model 非空时覆盖 Provider 的默认模型。
 	Model string
-	// Messages is the ordered conversation history sent to the model.
+	// Messages 是按顺序发送给模型的对话历史。
 	Messages []Message
-	// Tools exposes local callable functions to models that support tool calling.
+	// Tools 是暴露给支持 tool calling 模型的本地可调用函数。
 	Tools []Tool
 }
 
-// ChatResponse is the provider-neutral response shape returned by every Provider.
+// ChatResponse 是所有 Provider 返回的标准化响应结构。
 type ChatResponse struct {
-	// Message is the assistant message returned by the model.
+	// Message 是模型返回的 assistant 消息。
 	Message Message
 }
 
-// Message represents one normalized chat message in the conversation history.
+// Message 表示对话历史中的一条标准化消息。
 type Message struct {
-	// Role identifies who produced the message.
+	// Role 标识消息来源。
 	Role Role
-	// Content contains visible text for user, assistant, and tool result messages.
+	// Content 保存用户、assistant 和 tool result 消息的可见文本。
 	Content string
-	// ToolCalls contains function calls requested by an assistant message.
+	// ToolCalls 保存 assistant 消息请求执行的函数调用。
 	ToolCalls []ToolCall
-	// ToolCallID links a tool result message back to the assistant tool call that requested it.
+	// ToolCallID 将 tool result 消息关联回对应的 assistant tool call。
 	ToolCallID string
 }
 
-// Tool describes one function-style tool exposed to the model.
+// Tool 描述一个暴露给模型的 function 风格工具。
 type Tool struct {
-	// Type is the OpenAI-compatible tool type; this project currently uses "function".
+	// Type 是 OpenAI-compatible 工具类型；当前项目使用 "function"。
 	Type string
-	// Function contains the callable function metadata and JSON schema.
+	// Function 保存可调用函数的元数据和 JSON Schema。
 	Function ToolFunction
 }
 
-// ToolFunction contains the function metadata sent in a tool schema.
+// ToolFunction 保存发送给模型的函数工具元数据。
 type ToolFunction struct {
-	// Name is the stable tool name the model uses in tool calls.
+	// Name 是模型在 tool call 中使用的稳定工具名。
 	Name string
-	// Description tells the model when to use the tool.
+	// Description 告诉模型何时使用该工具。
 	Description string
-	// Parameters is the JSON Schema object describing the tool arguments.
+	// Parameters 是描述工具参数的 JSON Schema object。
 	Parameters map[string]any
 }
 
-// ToolCall represents one function call requested by the model.
+// ToolCall 表示模型请求执行的一次函数调用。
 type ToolCall struct {
-	// ID uniquely identifies the tool call within the assistant message.
+	// ID 在当前 assistant 消息内唯一标识该 tool call。
 	ID string
-	// Type is the tool-call type; this project currently uses "function".
+	// Type 是 tool call 类型；当前项目使用 "function"。
 	Type string
-	// Function contains the function name and raw JSON arguments.
+	// Function 保存函数名和原始 JSON 参数。
 	Function ToolCallFunction
 }
 
-// ToolCallFunction contains the executable function name and JSON argument payload.
+// ToolCallFunction 保存可执行函数名和 JSON 参数负载。
 type ToolCallFunction struct {
-	// Name selects the registered local tool to execute.
+	// Name 选择要执行的本地注册工具。
 	Name string
-	// Arguments is the raw JSON object string produced by the model.
+	// Arguments 是模型生成的原始 JSON object 字符串。
 	Arguments string
 }

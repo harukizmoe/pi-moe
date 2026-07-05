@@ -9,19 +9,19 @@ import (
 	"harukizmoe/pimoe/internal/llms"
 )
 
-// Config is the root application configuration loaded from YAML.
+// Config 是从 YAML 加载的应用根配置。
 type Config struct {
-	// LLMs contains provider instances and the default provider selection.
+	// LLMs 包含 Provider 实例和默认 Provider 选择。
 	LLMs llms.Config `mapstructure:"llms"`
 }
 
-// Load reads a YAML config file and resolves environment-backed secrets.
+// Load 读取 YAML 配置文件，并解析由环境变量承载的密钥。
 func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetConfigType("yaml")
 
-	// Read the file first so decode errors can include the exact path.
+	// 先读取文件，让读取错误带上明确的配置路径。
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
@@ -31,7 +31,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config %q: %w", path, err)
 	}
 
-	// API keys stay out of YAML; each provider names the environment variable to read.
+	// API Key 不写入 YAML；每个 Provider 只声明需要读取的环境变量名。
 	for name, provider := range cfg.LLMs.Providers {
 		if provider.APIKeyEnv != "" {
 			provider.APIKey = os.Getenv(provider.APIKeyEnv)

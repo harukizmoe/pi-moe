@@ -2,14 +2,14 @@ package tools
 
 import "context"
 
-// Tool is a local function the model can request through tool calling.
+// Tool 是模型可通过 tool calling 请求执行的本地函数。
 type Tool interface {
-	// Name returns the stable function name exposed to the model.
+	// Name 返回暴露给模型的稳定函数名。
 	Name() string
-	// Description explains when the model should use this tool.
+	// Description 说明模型何时应该使用该工具。
 	Description() string
-	// Parameters returns the JSON Schema object for the tool arguments.
+	// Parameters 返回工具参数的 JSON Schema object。
 	Parameters() map[string]any
-	// Call executes the tool with raw JSON arguments from the model.
+	// Call 使用模型传入的原始 JSON 参数执行工具。
 	Call(ctx context.Context, arguments string) (string, error)
 }

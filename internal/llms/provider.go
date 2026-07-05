@@ -5,33 +5,33 @@ import (
 	"fmt"
 )
 
-// Provider is the minimal interface every LLM backend must implement.
+// Provider 是所有 LLM 后端必须实现的最小接口。
 type Provider interface {
-	// Chat sends one normalized chat request and returns one normalized assistant message.
+	// Chat 发送一次标准化聊天请求，并返回一条标准化 assistant 消息。
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }
 
-// Factory builds a Provider from one provider instance config.
+// Factory 根据一个 Provider 实例配置创建 Provider。
 type Factory func(cfg ProviderConfig) (Provider, error)
 
-// Registry maps provider implementation types to factories.
+// Registry 将 Provider 实现类型映射到工厂函数。
 type Registry struct {
 	factories map[string]Factory
 }
 
-// NewRegistry creates an empty provider registry.
+// NewRegistry 创建空的 Provider 注册表。
 func NewRegistry() *Registry {
 	return &Registry{factories: map[string]Factory{}}
 }
 
-// Register binds a provider implementation type, such as "fake", to its factory.
+// Register 将 Provider 实现类型（例如 "fake"）绑定到对应工厂。
 func (r *Registry) Register(providerType string, factory Factory) {
 	r.factories[providerType] = factory
 }
 
-// NewProvider creates the Provider selected by cfg.Type.
+// NewProvider 创建 cfg.Type 选中的 Provider。
 func (r *Registry) NewProvider(cfg ProviderConfig) (Provider, error) {
-	// Provider instances choose implementations by type so names like "deepseek" can share "openai_compatible".
+	// Provider 实例通过 type 选择实现，因此 "deepseek" 这类实例名可以复用 "openai_compatible"。
 	factory, ok := r.factories[cfg.Type]
 	if !ok {
 		return nil, fmt.Errorf("unknown llm provider type %q", cfg.Type)

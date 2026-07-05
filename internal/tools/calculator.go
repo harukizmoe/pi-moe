@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// Calculator performs basic arithmetic for tool-calling demos.
+// Calculator 为 tool calling 演示提供基础四则运算。
 type Calculator struct{}
 
 type calculatorArgs struct {
@@ -15,17 +15,17 @@ type calculatorArgs struct {
 	Op string  `json:"op"`
 }
 
-// Name returns the function name exposed to the model.
+// Name 返回暴露给模型的函数名。
 func (Calculator) Name() string {
 	return "calculator"
 }
 
-// Description explains the calculator tool to the model.
+// Description 向模型说明 calculator 工具用途。
 func (Calculator) Description() string {
 	return "Calculate two numbers."
 }
 
-// Parameters returns the JSON Schema object for calculator arguments.
+// Parameters 返回 calculator 参数的 JSON Schema object。
 func (Calculator) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -38,14 +38,14 @@ func (Calculator) Parameters() map[string]any {
 	}
 }
 
-// Call validates and executes one calculator operation.
+// Call 校验并执行一次 calculator 运算。
 func (Calculator) Call(ctx context.Context, arguments string) (string, error) {
 	var rawArgs map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(arguments), &rawArgs); err != nil {
 		return "", fmt.Errorf("decode calculator arguments: %w", err)
 	}
 
-	// Validate required keys before decoding into numeric zero values.
+	// 先校验必填键，避免缺失字段被解码成数字零值后继续计算。
 	for _, required := range []string{"a", "b", "op"} {
 		if _, ok := rawArgs[required]; !ok {
 			return "", fmt.Errorf("missing required argument %q", required)
@@ -57,7 +57,7 @@ func (Calculator) Call(ctx context.Context, arguments string) (string, error) {
 		return "", fmt.Errorf("decode calculator arguments: %w", err)
 	}
 
-	// Execute only the small operation set declared in Parameters().
+	// 只执行 Parameters 中声明过的最小操作集合。
 	var result float64
 	switch args.Op {
 	case "add":

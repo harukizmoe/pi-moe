@@ -2,19 +2,19 @@ package llms
 
 import "context"
 
-// FakeProvider is a deterministic provider used to test tool calling without network access.
+// FakeProvider 是用于无网络测试 tool calling 的确定性 Provider。
 type FakeProvider struct {
 	model string
 }
 
-// NewFakeProvider creates a fake provider for local tests and CLI smoke checks.
+// NewFakeProvider 创建用于本地测试和 CLI smoke check 的 fake Provider。
 func NewFakeProvider(cfg ProviderConfig) (Provider, error) {
 	return &FakeProvider{model: cfg.Model}, nil
 }
 
-// Chat returns a fixed calculator tool call first, then turns the latest tool result into a final answer.
+// Chat 第一次返回固定 calculator tool call，随后把最近的 tool result 转成最终回答。
 func (p *FakeProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	// If the agent already executed a tool, finish the fake conversation with that result.
+	// 如果 agent 已经执行过工具，则用该工具结果结束 fake 对话。
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		msg := req.Messages[i]
 		if msg.Role == RoleTool {
@@ -22,7 +22,7 @@ func (p *FakeProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 		}
 	}
 
-	// Otherwise request the calculator tool with stable arguments so tests stay deterministic.
+	// 否则请求 calculator 工具，并使用稳定参数保证测试确定性。
 	return &ChatResponse{Message: Message{
 		Role: RoleAssistant,
 		ToolCalls: []ToolCall{{
