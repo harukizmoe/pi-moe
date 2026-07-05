@@ -19,29 +19,46 @@ func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 
 // RunResult 执行一次有步数上限的 tool calling 主循环，并返回结构化 trace。
 func (a *Agent) RunResult(ctx context.Context, input string) (*RunResult, error) {
-	return a.RunMessages(ctx, []llms.Message{{Role: llms.RoleUser, Content: input}})
+	return a.RunAgentMessages(ctx, []Message{UserMessage{Content: input}})
 }
 
-// RunMessages 从调用方提供的无状态对话历史继续执行 tool calling 主循环。
+// RunMessages 从调用方提供的无状态 LLM DTO 历史继续执行 tool calling 主循环。
 func (a *Agent) RunMessages(ctx context.Context, messages []llms.Message) (*RunResult, error) {
+	agentMessages, err := fromLLMMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+	return a.RunAgentMessages(ctx, agentMessages)
+}
+
+// RunAgentMessages 从调用方提供的强语义无状态对话历史继续执行 tool calling 主循环。
+func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunResult, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("messages must not be empty")
 	}
-	lastMessage := messages[len(messages)-1]
-	if lastMessage.Role != llms.RoleUser || strings.TrimSpace(lastMessage.Content) == "" {
+	lastMessage, ok := messages[len(messages)-1].(UserMessage)
+	if !ok || strings.TrimSpace(lastMessage.Content) == "" {
 		return nil, fmt.Errorf("last message must be a non-empty user message")
 	}
 
+	messages = append([]Message(nil), messages...)
+	if _, err := toLLMMessages(messages); err != nil {
+		return nil, err
+	}
+
 	result := &RunResult{}
-	messages = append([]llms.Message(nil), messages...)
 	toolSchemas := a.tools.Schemas()
 
-	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", lastMessage.Content)
+	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", strings.TrimSpace(lastMessage.Content))
 	for chatRound := 0; ; chatRound++ {
-		a.logLLMRequest(ctx, chatRound, len(messages), len(toolSchemas))
+		llmMessages, err := toLLMMessages(messages)
+		if err != nil {
+			return result, err
+		}
+		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
 			Model:    a.model,
-			Messages: messages,
+			Messages: llmMessages,
 			Tools:    toolSchemas,
 		})
 		if err != nil {
@@ -49,7 +66,13 @@ func (a *Agent) RunMessages(ctx context.Context, messages []llms.Message) (*RunR
 			return result, fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
 		}
 
-		assistantMessage := response.Message
+		assistantMessage := AssistantMessage{
+			Content:   response.Message.Content,
+			ToolCalls: append([]llms.ToolCall(nil), response.Message.ToolCalls...),
+		}
+		if _, err := toLLMMessage(assistantMessage); err != nil {
+			return result, fmt.Errorf("assistant response: %w", err)
+		}
 		if len(assistantMessage.ToolCalls) == 0 {
 			result.Answer = assistantMessage.Content
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
@@ -81,7 +104,7 @@ func (a *Agent) RunMessages(ctx context.Context, messages []llms.Message) (*RunR
 			result.Steps = append(result.Steps, step)
 			a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content})
-			messages = append(messages, toolMessage)
+			messages = append(messages, ToolResultMessage{ToolCallID: toolMessage.ToolCallID, ToolName: call.Function.Name, Content: toolMessage.Content})
 		}
 		result.ToolRounds++
 	}
