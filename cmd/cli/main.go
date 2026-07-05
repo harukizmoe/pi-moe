@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,7 +14,10 @@ import (
 	"harukizmoe/pimoe/internal/logger"
 )
 
-const agentLogPath = ".moe/logs/agent.log"
+const (
+	agentLogPath                 = ".moe/logs/agent.log"
+	defaultCLIProviderConfigPath = "configs/providers.yaml"
+)
 
 func main() {
 	appLogger, closeLogger, err := logger.NewDevelopmentFile(agentLogPath)
@@ -26,13 +30,19 @@ func main() {
 		}
 	}()
 
-	input, err := readInput(os.Args[1:], os.Stdin)
+	opts, err := parseCLIOptions(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	input, err := readInput(opts.promptArgs, os.Stdin)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	runner, err := harness.New(context.Background(), harness.Config{
-		ProviderConfigPath: "configs/providers.yaml",
+		ProviderConfigPath: opts.configPath,
+		ProviderName:       opts.providerName,
 		Logger:             appLogger,
 	})
 	if err != nil {
@@ -44,7 +54,29 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Print(formatRunResult(result, false))
+	fmt.Print(formatRunResult(result, opts.includeTrace))
+}
+
+type cliOptions struct {
+	configPath   string
+	providerName string
+	includeTrace bool
+	promptArgs   []string
+}
+
+func parseCLIOptions(args []string) (cliOptions, error) {
+	opts := cliOptions{configPath: defaultCLIProviderConfigPath}
+	flags := flag.NewFlagSet("pimoe", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
+	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
+	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
+
+	if err := flags.Parse(args); err != nil {
+		return cliOptions{}, fmt.Errorf("parse flags: %w", err)
+	}
+	opts.promptArgs = flags.Args()
+	return opts, nil
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {

@@ -52,6 +52,51 @@ func TestReadInputRejectsEmptyOrWhitespaceInput(t *testing.T) {
 	}
 }
 
+func TestParseCLIOptionsDefaults(t *testing.T) {
+	got, err := parseCLIOptions([]string{"use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.configPath != defaultCLIProviderConfigPath {
+		t.Fatalf("configPath = %q, want %q", got.configPath, defaultCLIProviderConfigPath)
+	}
+	if got.providerName != "" {
+		t.Fatalf("providerName = %q, want empty", got.providerName)
+	}
+	if got.includeTrace {
+		t.Fatal("includeTrace = true, want false")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
+	got, err := parseCLIOptions([]string{
+		"--config", "testdata/providers.yaml",
+		"--provider", "moeco",
+		"--trace",
+		"use", "calculator",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.configPath != "testdata/providers.yaml" {
+		t.Fatalf("configPath = %q", got.configPath)
+	}
+	if got.providerName != "moeco" {
+		t.Fatalf("providerName = %q, want moeco", got.providerName)
+	}
+	if !got.includeTrace {
+		t.Fatal("includeTrace = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
 func TestFormatRunResultAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
 	result := &agent.RunResult{
 		Answer: "done without tools",
