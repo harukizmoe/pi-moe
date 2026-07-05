@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"harukizmoe/pimoe/internal/agent"
 	appconfig "harukizmoe/pimoe/internal/config"
@@ -77,5 +78,10 @@ func New(ctx context.Context, cfg Config) (*Harness, error) {
 
 // Run 执行一次 Agent 运行，并返回结构化结果。
 func (h *Harness) Run(ctx context.Context, input string) (*agent.RunResult, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, fmt.Errorf("empty input")
+	}
+
 	return h.agent.RunResult(ctx, input)
 }

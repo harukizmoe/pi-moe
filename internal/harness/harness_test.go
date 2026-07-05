@@ -117,6 +117,67 @@ func TestNewReturnsErrorWhenProviderTypeUnknown(t *testing.T) {
 	}
 }
 
+func TestRunRejectsEmptyOrWhitespaceOnlyInput(t *testing.T) {
+	h := newFakeHarness(t)
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "empty", input: ""},
+		{name: "spaces", input: "   "},
+		{name: "mixed_whitespace", input: " \n\t "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := h.Run(context.Background(), tt.input)
+			if err == nil {
+				t.Fatalf("Run(%q) error = nil, want empty input error", tt.input)
+			}
+			if !strings.Contains(err.Error(), "empty input") {
+				t.Fatalf("Run(%q) error = %v, want empty input message", tt.input, err)
+			}
+		})
+	}
+}
+
+func TestRunTrimsSurroundingWhitespaceBeforePassingInputOnward(t *testing.T) {
+	h := newFakeHarness(t)
+
+	got, err := h.Run(context.Background(), "  use calculator to compute 13 * 7  ")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Run() result = nil")
+	}
+	if got.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
+	}
+}
+
+func newFakeHarness(t *testing.T) *Harness {
+	t.Helper()
+
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	h, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return h
+}
 func writeProvidersConfig(t *testing.T, content string) string {
 	t.Helper()
 
