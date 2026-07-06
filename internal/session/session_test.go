@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/llms"
@@ -252,6 +253,45 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 	}
 	if got := messagesAfterFirstPrompt[0].(agent.UserMessage).Content; got != "first prompt" {
 		t.Fatalf("final user message content = %q", got)
+	}
+}
+
+func TestSessionCancelEmitsTerminalErrorEvent(t *testing.T) {
+	provider := newBlockingProvider()
+	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model"), listeners: make(map[chan Event]struct{})}
+
+	stream := s.Prompt(context.Background(), "first prompt")
+	eventsDone := make(chan []Event, 1)
+	go func() {
+		eventsDone <- collectSessionStreamEvents(t, stream)
+	}()
+
+	<-provider.started
+	s.Cancel()
+
+	var events []Event
+	select {
+	case events = <-eventsDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Prompt() did not terminate after Cancel()")
+	}
+
+	if len(events) == 0 {
+		t.Fatal("events len = 0, want terminal ErrorEvent")
+	}
+
+	errEvent, ok := events[len(events)-1].(ErrorEvent)
+	if !ok {
+		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+	}
+	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), context.Canceled.Error()) {
+		t.Fatalf("last ErrorEvent.Error = %v, want context cancellation", errEvent.Error)
+	}
+
+	for i, event := range events {
+		if _, ok := event.(RunEndEvent); ok {
+			t.Fatalf("event[%d] = %T, want cancellation stream without RunEndEvent", i, event)
+		}
 	}
 }
 

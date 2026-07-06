@@ -103,12 +103,15 @@ func readInput(args []string, stdin io.Reader) (string, error) {
 	return input, nil
 }
 
+const maxInteractivePromptBytes = 1024 * 1024
+
 func runInteractive(ctx context.Context, runner *session.Session, input io.Reader, output io.Writer, includeTrace bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxInteractivePromptBytes)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return err

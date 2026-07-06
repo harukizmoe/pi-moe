@@ -43,6 +43,9 @@ func (s *Session) Prompt(ctx context.Context, input string) <-chan Event {
 	if trimmed == "" {
 		return closedErrorStream(fmt.Errorf("empty input"))
 	}
+	if ctx.Err() != nil {
+		return closedStream()
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	userMessage := agent.UserMessage{Content: trimmed}
@@ -54,12 +57,13 @@ func (s *Session) Prompt(ctx context.Context, input string) <-chan Event {
 		return closedErrorStream(fmt.Errorf("active turn already running"))
 	}
 	s.cancel = cancel
+	baseLen := len(s.messages)
 	s.messages = append(s.messages, userMessage)
 	snapshot := cloneSessionMessages(s.messages)
 	s.mu.Unlock()
 
-	out := make(chan Event)
-	go s.runPrompt(ctx, cancel, snapshot, out)
+	out := make(chan Event, 64)
+	go s.runPrompt(ctx, cancel, snapshot, baseLen, out)
 	return out
 }
 
@@ -89,21 +93,48 @@ func (s *Session) Cancel() {
 	}
 }
 
-func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snapshot []agent.Message, out chan<- Event) {
+func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snapshot []agent.Message, baseLen int, out chan<- Event) {
 	defer close(out)
+	completed := false
+	canceled := false
 	defer func() {
 		cancel()
+		if canceled && !completed {
+			s.discardMessagesFrom(baseLen)
+		}
 		s.mu.Lock()
 		s.cancel = nil
 		s.mu.Unlock()
 	}()
 
 	for event := range s.agent.Stream(ctx, snapshot) {
+		if _, ok := event.(RunEndEvent); ok {
+			completed = true
+		}
+		if _, ok := event.(ErrorEvent); ok && ctx.Err() != nil {
+			canceled = true
+			s.publish(event)
+			emitSessionTerminal(out, event)
+			return
+		}
+
 		s.applyTerminalEvent(event)
 		s.publish(event)
 		if !emitSessionEvent(ctx, out, event) {
+			if err := ctx.Err(); err != nil && !completed {
+				canceled = true
+				terminal := ErrorEvent{Error: err}
+				s.publish(terminal)
+				emitSessionTerminal(out, terminal)
+			}
 			return
 		}
+	}
+	if err := ctx.Err(); err != nil && !completed {
+		canceled = true
+		terminal := ErrorEvent{Error: err}
+		s.publish(terminal)
+		emitSessionTerminal(out, terminal)
 	}
 }
 
@@ -116,6 +147,14 @@ func (s *Session) applyTerminalEvent(event Event) {
 		s.messages = append(s.messages, cloneAssistantMessage(event.Message))
 	case ToolExecutionEndEvent:
 		s.messages = append(s.messages, event.Result)
+	}
+}
+
+func (s *Session) discardMessagesFrom(index int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index < len(s.messages) {
+		s.messages = s.messages[:index]
 	}
 }
 
@@ -145,6 +184,19 @@ func emitSessionEvent(ctx context.Context, stream chan<- Event, event Event) boo
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func emitSessionTerminal(stream chan<- Event, event Event) {
+	select {
+	case stream <- event:
+	default:
+	}
+}
+
+func closedStream() <-chan Event {
+	stream := make(chan Event)
+	close(stream)
+	return stream
 }
 
 func closedErrorStream(err error) <-chan Event {

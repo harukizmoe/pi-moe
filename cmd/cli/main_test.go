@@ -156,6 +156,45 @@ func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
 	}
 }
 
+func TestRunInteractiveAcceptsPromptLongerThanScannerTokenLimit(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	runner, err := session.New(context.Background(), session.Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("session.New() error = %v", err)
+	}
+
+	longPrompt := strings.Repeat("x", 70*1024)
+	input := strings.NewReader(longPrompt + "\nquit\n")
+	var output bytes.Buffer
+
+	if err := runInteractive(context.Background(), runner, input, &output, false); err != nil {
+		t.Fatalf("runInteractive() error for %d-byte line = %v", len(longPrompt), err)
+	}
+
+	if got := strings.Count(output.String(), "13 * 7 = 91\n"); got != 1 {
+		t.Fatalf("final answer occurrences = %d, want 1 in %q", got, output.String())
+	}
+
+	prompts := collectUserPrompts(runner.Messages())
+	if len(prompts) != 1 {
+		t.Fatalf("session user prompts len = %d, want 1", len(prompts))
+	}
+	if prompts[0] != longPrompt {
+		t.Fatalf("stored prompt len = %d, want %d", len(prompts[0]), len(longPrompt))
+	}
+}
+
 func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
 	output, err := collectRunOutput(eventStream(
 		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "done without tools"}},

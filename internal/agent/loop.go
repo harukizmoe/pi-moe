@@ -13,7 +13,7 @@ var nextRunSequence atomic.Uint64
 
 // Stream 从调用方提供的强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。
 func (a *Agent) Stream(ctx context.Context, messages []Message) <-chan Event {
-	stream := make(chan Event)
+	stream := make(chan Event, 64)
 	go func() {
 		defer close(stream)
 		a.stream(ctx, messages, stream)
@@ -75,7 +75,12 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 		})
 		if err != nil {
 			a.logLLMError(ctx, chatRound, err)
-			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("llm chat round %d: %w", chatRound+1, err)})
+			event := ErrorEvent{RunID: runID, Error: fmt.Errorf("llm chat round %d: %w", chatRound+1, err)}
+			if ctx.Err() != nil {
+				emitCancellation(stream, event)
+				return
+			}
+			emit(event)
 			return
 		}
 		if err := ctx.Err(); err != nil {

@@ -18,7 +18,7 @@ func collectSessionStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T) {
+func TestSessionPromptWithAlreadyCanceledContextClosesPromptlyAndLeavesTranscriptEmpty(t *testing.T) {
 	oldMaxProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() {
 		runtime.GOMAXPROCS(oldMaxProcs)
@@ -51,6 +51,10 @@ func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T)
 			}
 		case <-time.After(200 * time.Millisecond):
 			t.Fatal("Prompt() did not close promptly")
+		}
+
+		if messages := s.Messages(); len(messages) != 0 {
+			t.Fatalf("attempt %d: Messages() len after canceled Prompt = %d, want 0", attempt, len(messages))
 		}
 	}
 }
