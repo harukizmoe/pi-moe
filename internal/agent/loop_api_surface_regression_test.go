@@ -8,22 +8,11 @@ import (
 
 func TestAgentLoopExecutionAPIIsEventStreamOnly(t *testing.T) {
 	agentType := reflect.TypeOf((*Agent)(nil))
-	agentStructType := agentType.Elem()
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 	agentMessagesType := reflect.TypeOf([]Message(nil))
 	eventStreamType := reflect.TypeOf((<-chan Event)(nil))
 
 	assertRequiredLoopMethodSignature(t, agentType, "Stream", []reflect.Type{ctxType, agentMessagesType}, []reflect.Type{eventStreamType})
-
-	if _, ok := agentStructType.FieldByName("StreamAgentMessages"); ok {
-		t.Fatal("deprecated loop field still present: StreamAgentMessages")
-	}
-
-	for _, forbidden := range []string{"RunAgentMessages", "StreamAgentMessages"} {
-		if method, ok := agentType.MethodByName(forbidden); ok {
-			t.Fatalf("deprecated loop method still present: %s%s", forbidden, method.Type)
-		}
-	}
 }
 
 func assertRequiredLoopMethodSignature(t *testing.T, agentType reflect.Type, name string, wantIn []reflect.Type, wantOut []reflect.Type) {

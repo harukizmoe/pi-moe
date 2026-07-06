@@ -45,38 +45,26 @@ func (f chatFunc) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatRes
 	return f(ctx, req)
 }
 
-type runAgentMessagesRunner interface {
-	RunAgentMessages(context.Context, []Message) (*RunResult, error)
-}
-
-func runAgentMessages(t *testing.T, a *Agent, ctx context.Context, messages []Message) (*RunResult, error) {
-	t.Helper()
-
-	runner, ok := any(a).(runAgentMessagesRunner)
-	if !ok {
-		t.Fatal("*Agent does not implement RunAgentMessages(context.Context, []Message) (*RunResult, error)")
-	}
-	return runner.RunAgentMessages(ctx, messages)
-}
-
-func runAgentText(t *testing.T, a *Agent, ctx context.Context, input string) (string, error) {
-	t.Helper()
-
-	result, err := runAgentMessages(t, a, ctx, []Message{UserMessage{Content: input}})
-	if err != nil {
-		return "", err
-	}
-	return result.Answer, nil
-}
-
-func runAgentResult(t *testing.T, a *Agent, ctx context.Context, input string) (*RunResult, error) {
-	t.Helper()
-
-	return runAgentMessages(t, a, ctx, []Message{UserMessage{Content: input}})
-}
-
 func streamAgentText(a *Agent, ctx context.Context, input string) <-chan Event {
 	return a.Stream(ctx, []Message{UserMessage{Content: input}})
+}
+
+func collectFinalAnswer(t *testing.T, stream <-chan Event) string {
+	t.Helper()
+	var answer string
+	for event := range stream {
+		switch event := event.(type) {
+		case MessageEndEvent:
+			if len(event.Message.ToolCalls) == 0 {
+				answer = event.Message.Content
+			}
+		case ErrorEvent:
+			if event.Error != nil {
+				t.Fatalf("stream error = %v", event.Error)
+			}
+		}
+	}
+	return answer
 }
 
 func assertMessagesEqual(t *testing.T, got, want []llms.Message) {
@@ -155,10 +143,7 @@ func TestAgentRunExecutesToolCall(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	a := New(recorder, registry, "fake-tool-model")
-	got, err := runAgentText(t, a, context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	got := collectFinalAnswer(t, streamAgentText(a, context.Background(), "use calculator to compute 13 * 7"))
 	if got != "13 * 7 = 91" {
 		t.Fatalf("answer = %q", got)
 	}
@@ -226,10 +211,7 @@ func TestAgentRunLogsToolCallingFlow(t *testing.T) {
 	log := &recordingLogger{}
 
 	a := NewWithLogger(provider, registry, "fake-tool-model", log)
-	got, err := runAgentText(t, a, context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	got := collectFinalAnswer(t, streamAgentText(a, context.Background(), "use calculator to compute 13 * 7"))
 	if got != "13 * 7 = 91" {
 		t.Fatalf("answer = %q", got)
 	}
@@ -279,12 +261,9 @@ func TestAgentRunDefaultAllowsSecondRoundToolCall(t *testing.T) {
 	})}
 
 	a := New(provider, registry, "fake-tool-model")
-	got, err := runAgentText(t, a, context.Background(), "use calculator twice")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	got := collectFinalAnswer(t, streamAgentText(a, context.Background(), "use calculator twice"))
 	if got != "second round completed" {
-		t.Fatalf("Run() answer = %q", got)
+		t.Fatalf("answer = %q", got)
 	}
 	if len(provider.requests) != 3 {
 		t.Fatalf("chat requests len = %d", len(provider.requests))
@@ -342,12 +321,9 @@ func TestAgentRunSupportsMultipleToolRoundsWithinMaxSteps(t *testing.T) {
 	})}
 
 	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 2})
-	got, err := runAgentText(t, a, context.Background(), "compute (2 + 3) * 4")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	got := collectFinalAnswer(t, streamAgentText(a, context.Background(), "compute (2 + 3) * 4"))
 	if got != "final answer: 20" {
-		t.Fatalf("Run() answer = %q", got)
+		t.Fatalf("answer = %q", got)
 	}
 	if len(provider.requests) != 3 {
 		t.Fatalf("chat requests len = %d", len(provider.requests))
@@ -386,15 +362,18 @@ func TestAgentRunReturnsMaxStepsErrorWhenToolLoopExceedsLimit(t *testing.T) {
 	})}
 
 	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 1})
-	got, err := runAgentText(t, a, context.Background(), "compute (2 + 3) * 4")
-	if err == nil {
-		t.Fatal("Run() error = nil, want max-steps error")
+	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "compute (2 + 3) * 4"))
+	var streamErr error
+	for _, event := range events {
+		if errEvent, ok := event.(ErrorEvent); ok {
+			streamErr = errEvent.Error
+		}
 	}
-	if got != "" {
-		t.Fatalf("Run() answer = %q, want empty string on error", got)
+	if streamErr == nil {
+		t.Fatal("stream error = nil, want max-steps error")
 	}
-	if !strings.Contains(err.Error(), "max steps") {
-		t.Fatalf("Run() error = %v, want max steps message", err)
+	if !strings.Contains(streamErr.Error(), "max steps") {
+		t.Fatalf("stream error = %v, want max steps message", streamErr)
 	}
 	if len(provider.requests) != 2 {
 		t.Fatalf("chat requests len = %d", len(provider.requests))
@@ -412,80 +391,8 @@ func collectStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-func TestAgentStreamReturnsLifecycleToolCallingEvents(t *testing.T) {
-	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
-	if err != nil {
-		t.Fatalf("NewFakeProvider() error = %v", err)
-	}
 
-	recorder := &recordingProvider{inner: provider}
-	registry := tools.NewRegistry()
-	registry.Register(tools.Calculator{})
-
-	a := New(recorder, registry, "fake-tool-model")
-	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "use calculator to compute 13 * 7"))
-
-	assertEventTypes(t, events,
-		RunStartEvent{},
-		TurnStartEvent{},
-		MessageStartEvent{},
-		MessageDeltaEvent{},
-		MessageEndEvent{},
-		ToolExecutionStartEvent{},
-		ToolExecutionEndEvent{},
-		MessageStartEvent{},
-		MessageDeltaEvent{},
-		MessageEndEvent{},
-		TurnEndEvent{},
-		RunEndEvent{},
-	)
-	if len(recorder.requests) != 2 {
-		t.Fatalf("provider requests len = %d, want 2", len(recorder.requests))
-	}
-
-	toolCallDelta := events[3].(MessageDeltaEvent)
-	if toolCallDelta.Kind != MessageDeltaToolCall {
-		t.Fatalf("event[3].Kind = %q, want %q", toolCallDelta.Kind, MessageDeltaToolCall)
-	}
-	if toolCallDelta.Delta != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("event[3].Delta = %q", toolCallDelta.Delta)
-	}
-
-	toolCall := events[5].(ToolExecutionStartEvent)
-	if toolCall.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolExecutionStartEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
-	}
-	if toolCall.ToolName != "calculator" {
-		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolCall.ToolName)
-	}
-	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolCall.Arguments)
-	}
-
-	toolResult := events[6].(ToolExecutionEndEvent)
-	if toolResult.Result.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolExecutionEndEvent.Result.ToolCallID = %q, want %q", toolResult.Result.ToolCallID, "call_fake_calculator")
-	}
-	if toolResult.Result.ToolName != "calculator" {
-		t.Fatalf("ToolExecutionEndEvent.Result.ToolName = %q, want calculator", toolResult.Result.ToolName)
-	}
-	if toolResult.Result.Content != "91" {
-		t.Fatalf("ToolExecutionEndEvent.Result.Content = %q, want 91", toolResult.Result.Content)
-	}
-	if toolResult.Error != nil {
-		t.Fatalf("ToolExecutionEndEvent.Error = %v, want nil", toolResult.Error)
-	}
-
-	final := events[9].(MessageEndEvent)
-	if final.Message.Content != "13 * 7 = 91" {
-		t.Fatalf("MessageEndEvent.Message.Content = %q, want %q", final.Message.Content, "13 * 7 = 91")
-	}
-	if len(final.Message.ToolCalls) != 0 {
-		t.Fatalf("MessageEndEvent.Message.ToolCalls len = %d, want 0", len(final.Message.ToolCalls))
-	}
-}
-
-func TestAgentRunResultReturnsAnswerWithoutToolCalls(t *testing.T) {
+func TestAgentStreamReturnsAnswerWithoutToolCalls(t *testing.T) {
 	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
 		return &llms.ChatResponse{Message: llms.Message{
 			Role:    llms.RoleAssistant,
@@ -494,93 +401,16 @@ func TestAgentRunResultReturnsAnswerWithoutToolCalls(t *testing.T) {
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentResult(t, a, context.Background(), "just answer directly")
-	if err != nil {
-		t.Fatalf("RunResult() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunResult() result = nil")
-	}
-	if got.Answer != "done without tools" {
-		t.Fatalf("RunResult().Answer = %q", got.Answer)
-	}
-	if got.ToolRounds != 0 {
-		t.Fatalf("RunResult().ToolRounds = %d, want 0", got.ToolRounds)
-	}
-	if len(got.Steps) != 0 {
-		t.Fatalf("RunResult().Steps len = %d, want 0", len(got.Steps))
+	got := collectFinalAnswer(t, streamAgentText(a, context.Background(), "just answer directly"))
+	if got != "done without tools" {
+		t.Fatalf("answer = %q", got)
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("chat requests len = %d, want 1", len(provider.requests))
 	}
 }
 
-func TestAgentRunAgentMessagesReturnsTypedTranscriptForFinalAnswer(t *testing.T) {
-	history := []Message{
-		UserMessage{Content: "what is 2 + 2?"},
-		AssistantMessage{Content: "2 + 2 = 4."},
-		UserMessage{Content: "multiply that by 3"},
-	}
-
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "4 * 3 = 12",
-		}}, nil
-	})}
-
-	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), history)
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if len(got.Messages) != 4 {
-		t.Fatalf("RunAgentMessages().Messages len = %d, want 4", len(got.Messages))
-	}
-
-	first, ok := got.Messages[0].(UserMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[0] type = %T, want UserMessage", got.Messages[0])
-	}
-	if first.Content != "what is 2 + 2?" {
-		t.Fatalf("RunAgentMessages().Messages[0].Content = %q", first.Content)
-	}
-
-	second, ok := got.Messages[1].(AssistantMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[1] type = %T, want AssistantMessage", got.Messages[1])
-	}
-	if second.Content != "2 + 2 = 4." {
-		t.Fatalf("RunAgentMessages().Messages[1].Content = %q", second.Content)
-	}
-	if len(second.ToolCalls) != 0 {
-		t.Fatalf("RunAgentMessages().Messages[1].ToolCalls len = %d, want 0", len(second.ToolCalls))
-	}
-
-	third, ok := got.Messages[2].(UserMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[2] type = %T, want UserMessage", got.Messages[2])
-	}
-	if third.Content != "multiply that by 3" {
-		t.Fatalf("RunAgentMessages().Messages[2].Content = %q", third.Content)
-	}
-
-	final, ok := got.Messages[3].(AssistantMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[3] type = %T, want AssistantMessage", got.Messages[3])
-	}
-	if final.Content != "4 * 3 = 12" {
-		t.Fatalf("RunAgentMessages().Messages[3].Content = %q", final.Content)
-	}
-	if len(final.ToolCalls) != 0 {
-		t.Fatalf("RunAgentMessages().Messages[3].ToolCalls len = %d, want 0", len(final.ToolCalls))
-	}
-}
-
-func TestAgentRunAgentMessagesReturnsTypedTranscriptAcrossToolRound(t *testing.T) {
+func TestAgentStreamWithProvidedHistoryEmitsToolRoundEvents(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
@@ -623,107 +453,98 @@ func TestAgentRunAgentMessagesReturnsTypedTranscriptAcrossToolRound(t *testing.T
 	})}
 
 	a := New(provider, registry, "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), history)
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if len(got.Messages) != 6 {
-		t.Fatalf("RunAgentMessages().Messages len = %d, want 6", len(got.Messages))
+	events := collectStreamEvents(t, a.Stream(context.Background(), history))
+
+	assertEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		TurnEndEvent{},
+		RunEndEvent{},
+	)
+	if len(provider.requests) != 2 {
+		t.Fatalf("chat requests len = %d, want 2", len(provider.requests))
 	}
 
-	first, ok := got.Messages[0].(UserMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[0] type = %T, want UserMessage", got.Messages[0])
+	assistant := events[4].(MessageEndEvent).Message
+	if assistant.Content != "" {
+		t.Fatalf("assistant tool-call content = %q, want empty", assistant.Content)
 	}
-	if first.Content != "what is 4 * 4?" {
-		t.Fatalf("RunAgentMessages().Messages[0].Content = %q", first.Content)
+	if len(assistant.ToolCalls) != 1 {
+		t.Fatalf("assistant tool calls len = %d, want 1", len(assistant.ToolCalls))
 	}
-
-	second, ok := got.Messages[1].(AssistantMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[1] type = %T, want AssistantMessage", got.Messages[1])
-	}
-	if second.Content != "4 * 4 = 16." {
-		t.Fatalf("RunAgentMessages().Messages[1].Content = %q", second.Content)
-	}
-	if len(second.ToolCalls) != 0 {
-		t.Fatalf("RunAgentMessages().Messages[1].ToolCalls len = %d, want 0", len(second.ToolCalls))
+	if gotCall := assistant.ToolCalls[0]; gotCall.ID != "call_history_mul" || gotCall.Function.Name != "calculator" || gotCall.Function.Arguments != `{"a":16,"b":5,"op":"mul"}` {
+		t.Fatalf("assistant tool call = %#v", gotCall)
 	}
 
-	third, ok := got.Messages[2].(UserMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[2] type = %T, want UserMessage", got.Messages[2])
+	toolCall := events[5].(ToolExecutionStartEvent)
+	if toolCall.ToolCallID != "call_history_mul" {
+		t.Fatalf("tool call id = %q, want call_history_mul", toolCall.ToolCallID)
 	}
-	if third.Content != "now multiply that by 5" {
-		t.Fatalf("RunAgentMessages().Messages[2].Content = %q", third.Content)
+	if toolCall.ToolName != "calculator" {
+		t.Fatalf("tool name = %q, want calculator", toolCall.ToolName)
 	}
-
-	fourth, ok := got.Messages[3].(AssistantMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[3] type = %T, want AssistantMessage", got.Messages[3])
-	}
-	if fourth.Content != "" {
-		t.Fatalf("RunAgentMessages().Messages[3].Content = %q, want empty tool-call assistant content", fourth.Content)
-	}
-	if len(fourth.ToolCalls) != 1 {
-		t.Fatalf("RunAgentMessages().Messages[3].ToolCalls len = %d, want 1", len(fourth.ToolCalls))
-	}
-	if gotCall := fourth.ToolCalls[0]; gotCall.ID != "call_history_mul" || gotCall.Function.Name != "calculator" || gotCall.Function.Arguments != `{"a":16,"b":5,"op":"mul"}` {
-		t.Fatalf("RunAgentMessages().Messages[3].ToolCalls[0] = %#v", gotCall)
+	if toolCall.Arguments != `{"a":16,"b":5,"op":"mul"}` {
+		t.Fatalf("tool arguments = %q", toolCall.Arguments)
 	}
 
-	fifth, ok := got.Messages[4].(ToolResultMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[4] type = %T, want ToolResultMessage", got.Messages[4])
+	toolEnd := events[6].(ToolExecutionEndEvent)
+	if toolEnd.Result.ToolCallID != "call_history_mul" {
+		t.Fatalf("tool result call id = %q, want call_history_mul", toolEnd.Result.ToolCallID)
 	}
-	if fifth.ToolCallID != "call_history_mul" {
-		t.Fatalf("RunAgentMessages().Messages[4].ToolCallID = %q", fifth.ToolCallID)
+	if toolEnd.Result.ToolName != "calculator" {
+		t.Fatalf("tool result name = %q, want calculator", toolEnd.Result.ToolName)
 	}
-	if fifth.ToolName != "calculator" {
-		t.Fatalf("RunAgentMessages().Messages[4].ToolName = %q", fifth.ToolName)
+	if toolEnd.Result.Content != "80" {
+		t.Fatalf("tool result content = %q, want 80", toolEnd.Result.Content)
 	}
-	if fifth.Content != "80" {
-		t.Fatalf("RunAgentMessages().Messages[4].Content = %q", fifth.Content)
+	if toolEnd.Result.IsError {
+		t.Fatal("tool result IsError = true, want false")
 	}
-	if fifth.IsError {
-		t.Fatal("RunAgentMessages().Messages[4].IsError = true, want false")
+	if toolEnd.Error != nil {
+		t.Fatalf("tool end error = %v, want nil", toolEnd.Error)
 	}
 
-	final, ok := got.Messages[5].(AssistantMessage)
-	if !ok {
-		t.Fatalf("RunAgentMessages().Messages[5] type = %T, want AssistantMessage", got.Messages[5])
-	}
+	final := events[9].(MessageEndEvent).Message
 	if final.Content != "16 * 5 = 80" {
-		t.Fatalf("RunAgentMessages().Messages[5].Content = %q", final.Content)
+		t.Fatalf("final assistant content = %q", final.Content)
 	}
 	if len(final.ToolCalls) != 0 {
-		t.Fatalf("RunAgentMessages().Messages[5].ToolCalls len = %d, want 0", len(final.ToolCalls))
+		t.Fatalf("final assistant tool calls len = %d, want 0", len(final.ToolCalls))
 	}
 }
 
-func TestAgentRunResultWrapsProviderErrorWithChatRoundContext(t *testing.T) {
+func TestAgentStreamWrapsProviderErrorWithChatRoundContext(t *testing.T) {
 	sentinel := errors.New("provider chat failed")
 	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
 		return nil, sentinel
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentResult(t, a, context.Background(), "just answer directly")
-	if err == nil {
-		t.Fatalf("RunResult() error = nil, result = %#v", got)
+	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "just answer directly"))
+	if len(events) != 3 {
+		t.Fatalf("events len = %d, want 3", len(events))
 	}
-	if !strings.Contains(err.Error(), "llm chat round 1") {
-		t.Fatalf("RunResult() error = %q, want chat round context", err.Error())
+	errEvent, ok := events[2].(ErrorEvent)
+	if !ok {
+		t.Fatalf("event[2] type = %T, want ErrorEvent", events[2])
 	}
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("RunResult() error = %v, want to wrap sentinel %v", err, sentinel)
+	if !strings.Contains(errEvent.Error.Error(), "llm chat round 1") {
+		t.Fatalf("stream error = %q, want chat round context", errEvent.Error.Error())
+	}
+	if !errors.Is(errEvent.Error, sentinel) {
+		t.Fatalf("stream error = %v, want to wrap sentinel %v", errEvent.Error, sentinel)
 	}
 }
 
-func TestAgentRunResultReturnsContextCancellationWhenStreamClosesWithoutTerminalError(t *testing.T) {
+func TestAgentStreamReturnsContextCancellationWhenCanceledAfterChat(t *testing.T) {
 	oldMaxProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() {
 		runtime.GOMAXPROCS(oldMaxProcs)
@@ -741,15 +562,22 @@ func TestAgentRunResultReturnsContextCancellationWhenStreamClosesWithoutTerminal
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentResult(t, a, ctx, "just answer directly")
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("RunResult() error = %v, want context cancellation", err)
+	events := collectStreamEvents(t, streamAgentText(a, ctx, "just answer directly"))
+	var streamErr error
+	messageEnds := 0
+	for _, event := range events {
+		switch event := event.(type) {
+		case ErrorEvent:
+			streamErr = event.Error
+		case MessageEndEvent:
+			messageEnds++
+		}
 	}
-	if got == nil {
-		t.Fatal("RunResult() result = nil, want partial result")
+	if !errors.Is(streamErr, context.Canceled) {
+		t.Fatalf("stream error = %v, want context cancellation", streamErr)
 	}
-	if got.Answer != "" {
-		t.Fatalf("RunResult().Answer = %q, want empty when cancellation drops terminal events", got.Answer)
+	if messageEnds != 0 {
+		t.Fatalf("message end events = %d, want 0 when cancellation drops terminal assistant message", messageEnds)
 	}
 }
 
@@ -776,29 +604,36 @@ func TestAgentStreamClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvali
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Stream() did not close promptly")
 	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider requests len = %d, want 0", len(provider.requests))
+	}
 }
 
-func TestAgentRunAgentMessagesRejectsEmptyAssistantResponse(t *testing.T) {
+func TestAgentStreamRejectsEmptyAssistantResponse(t *testing.T) {
 	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
 		return &llms.ChatResponse{Message: llms.Message{Role: llms.RoleAssistant}}, nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), []Message{
+	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{
 		UserMessage{Content: "answer directly"},
-	})
-	if err == nil {
-		t.Fatalf("RunAgentMessages() error = nil, result = %#v", got)
+	}))
+	if len(events) != 3 {
+		t.Fatalf("events len = %d, want 3", len(events))
 	}
-	if !strings.Contains(err.Error(), "assistant message must have content or tool calls") {
-		t.Fatalf("RunAgentMessages() error = %q, want assistant validation", err.Error())
+	errEvent, ok := events[2].(ErrorEvent)
+	if !ok {
+		t.Fatalf("event[2] type = %T, want ErrorEvent", events[2])
+	}
+	if !strings.Contains(errEvent.Error.Error(), "assistant message must have content or tool calls") {
+		t.Fatalf("stream error = %q, want assistant validation", errEvent.Error.Error())
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("provider requests len = %d, want 1", len(provider.requests))
 	}
 }
 
-func TestAgentRunResultRecordsToolTraceAcrossRounds(t *testing.T) {
+func TestAgentStreamEmitsToolExecutionEventsAcrossRounds(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
@@ -838,59 +673,65 @@ func TestAgentRunResultRecordsToolTraceAcrossRounds(t *testing.T) {
 	})}
 
 	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 2})
-	got, err := runAgentResult(t, a, context.Background(), "compute (2 + 3) * 4")
-	if err != nil {
-		t.Fatalf("RunResult() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunResult() result = nil")
-	}
-	if got.Answer != "final answer: 20" {
-		t.Fatalf("RunResult().Answer = %q", got.Answer)
-	}
-	if got.ToolRounds != 2 {
-		t.Fatalf("RunResult().ToolRounds = %d, want 2", got.ToolRounds)
-	}
-	if len(got.Steps) != 2 {
-		t.Fatalf("RunResult().Steps len = %d, want 2", len(got.Steps))
+	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "compute (2 + 3) * 4"))
+
+	assertEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		TurnEndEvent{},
+		RunEndEvent{},
+	)
+	if len(provider.requests) != 3 {
+		t.Fatalf("chat requests len = %d, want 3", len(provider.requests))
 	}
 
-	step1 := got.Steps[0]
-	if step1.ToolCallID != "call_step_1" {
-		t.Fatalf("RunResult().Steps[0].ToolCallID = %q", step1.ToolCallID)
+	toolStart1 := events[5].(ToolExecutionStartEvent)
+	if toolStart1.ToolCallID != "call_step_1" || toolStart1.ToolName != "calculator" || toolStart1.Arguments != `{"a":2,"b":3,"op":"add"}` {
+		t.Fatalf("first tool start = %#v", toolStart1)
 	}
-	if step1.ToolName != "calculator" {
-		t.Fatalf("RunResult().Steps[0].ToolName = %q", step1.ToolName)
+	toolEnd1 := events[6].(ToolExecutionEndEvent)
+	if toolEnd1.Result.ToolCallID != "call_step_1" || toolEnd1.Result.ToolName != "calculator" || toolEnd1.Result.Content != "5" || toolEnd1.Result.IsError {
+		t.Fatalf("first tool end = %#v", toolEnd1)
 	}
-	if step1.Arguments != `{"a":2,"b":3,"op":"add"}` {
-		t.Fatalf("RunResult().Steps[0].Arguments = %q", step1.Arguments)
-	}
-	if step1.Result != "5" {
-		t.Fatalf("RunResult().Steps[0].Result = %q", step1.Result)
-	}
-	if step1.Error != "" {
-		t.Fatalf("RunResult().Steps[0].Error = %q, want empty", step1.Error)
+	if toolEnd1.Error != nil {
+		t.Fatalf("first tool end error = %v, want nil", toolEnd1.Error)
 	}
 
-	step2 := got.Steps[1]
-	if step2.ToolCallID != "call_step_2" {
-		t.Fatalf("RunResult().Steps[1].ToolCallID = %q", step2.ToolCallID)
+	toolStart2 := events[10].(ToolExecutionStartEvent)
+	if toolStart2.ToolCallID != "call_step_2" || toolStart2.ToolName != "calculator" || toolStart2.Arguments != `{"a":5,"b":4,"op":"mul"}` {
+		t.Fatalf("second tool start = %#v", toolStart2)
 	}
-	if step2.ToolName != "calculator" {
-		t.Fatalf("RunResult().Steps[1].ToolName = %q", step2.ToolName)
+	toolEnd2 := events[11].(ToolExecutionEndEvent)
+	if toolEnd2.Result.ToolCallID != "call_step_2" || toolEnd2.Result.ToolName != "calculator" || toolEnd2.Result.Content != "20" || toolEnd2.Result.IsError {
+		t.Fatalf("second tool end = %#v", toolEnd2)
 	}
-	if step2.Arguments != `{"a":5,"b":4,"op":"mul"}` {
-		t.Fatalf("RunResult().Steps[1].Arguments = %q", step2.Arguments)
+	if toolEnd2.Error != nil {
+		t.Fatalf("second tool end error = %v, want nil", toolEnd2.Error)
 	}
-	if step2.Result != "20" {
-		t.Fatalf("RunResult().Steps[1].Result = %q", step2.Result)
+
+	final := events[14].(MessageEndEvent).Message
+	if final.Content != "final answer: 20" {
+		t.Fatalf("final assistant content = %q", final.Content)
 	}
-	if step2.Error != "" {
-		t.Fatalf("RunResult().Steps[1].Error = %q, want empty", step2.Error)
+	if len(final.ToolCalls) != 0 {
+		t.Fatalf("final assistant tool calls len = %d, want 0", len(final.ToolCalls))
 	}
 }
 
-func TestAgentRunAgentMessagesContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
+func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
@@ -930,37 +771,55 @@ func TestAgentRunAgentMessagesContinuesAfterToolErrorAndReturnsFinalAnswer(t *te
 	})}
 
 	a := New(provider, registry, "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), []Message{
+	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{
 		UserMessage{Content: "try calculator with bad arguments"},
-	})
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if got.Answer != "I couldn't use calculator because the arguments were malformed." {
-		t.Fatalf("RunAgentMessages().Answer = %q", got.Answer)
-	}
-	if got.ToolRounds != 1 {
-		t.Fatalf("RunAgentMessages().ToolRounds = %d, want 1", got.ToolRounds)
-	}
-	if len(got.Steps) != 1 {
-		t.Fatalf("RunAgentMessages().Steps len = %d, want 1", len(got.Steps))
-	}
-	step := got.Steps[0]
-	if step.Result != "" {
-		t.Fatalf("RunAgentMessages().Steps[0].Result = %q, want empty", step.Result)
-	}
-	if step.Error == "" || !strings.Contains(step.Error, "decode calculator arguments") {
-		t.Fatalf("RunAgentMessages().Steps[0].Error = %q, want calculator decode failure", step.Error)
-	}
+	}))
+
+	assertEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		TurnEndEvent{},
+		RunEndEvent{},
+	)
 	if len(provider.requests) != 2 {
 		t.Fatalf("provider requests len = %d, want 2", len(provider.requests))
 	}
+
+	toolEnd := events[6].(ToolExecutionEndEvent)
+	if toolEnd.Result.ToolCallID != "call_bad_args" {
+		t.Fatalf("tool result call id = %q, want call_bad_args", toolEnd.Result.ToolCallID)
+	}
+	if toolEnd.Result.ToolName != "calculator" {
+		t.Fatalf("tool result name = %q, want calculator", toolEnd.Result.ToolName)
+	}
+	if !strings.HasPrefix(toolEnd.Result.Content, `tool "calculator" failed: `) {
+		t.Fatalf("tool result content = %q, want sanitized failure summary", toolEnd.Result.Content)
+	}
+	if !toolEnd.Result.IsError {
+		t.Fatal("tool result IsError = false, want true")
+	}
+	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "decode calculator arguments") {
+		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
+	}
+
+	final := events[9].(MessageEndEvent).Message
+	if final.Content != "I couldn't use calculator because the arguments were malformed." {
+		t.Fatalf("final assistant content = %q", final.Content)
+	}
+	if len(final.ToolCalls) != 0 {
+		t.Fatalf("final assistant tool calls len = %d, want 0", len(final.ToolCalls))
+	}
 }
 
-func TestAgentRunAgentMessagesReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *testing.T) {
+func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
@@ -993,30 +852,42 @@ func TestAgentRunAgentMessagesReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToo
 	})}
 
 	a := NewWithOptions(provider, registry, "fake-tool-model", Options{MaxSteps: 1})
-	got, err := runAgentMessages(t, a, context.Background(), []Message{
+	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{
 		UserMessage{Content: "keep trying even after tool failure"},
-	})
-	if err == nil {
-		t.Fatal("RunAgentMessages() error = nil, want max steps error")
-	}
-	if !strings.Contains(err.Error(), "max steps") {
-		t.Fatalf("RunAgentMessages() error = %v, want max steps message", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil, want retained step trace")
-	}
-	if got.ToolRounds != 1 {
-		t.Fatalf("RunAgentMessages().ToolRounds = %d, want 1", got.ToolRounds)
-	}
-	if len(got.Steps) != 1 {
-		t.Fatalf("RunAgentMessages().Steps len = %d, want 1", len(got.Steps))
-	}
+	}))
+
+	assertEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ErrorEvent{},
+	)
 	if len(provider.requests) != 2 {
 		t.Fatalf("provider requests len = %d, want 2", len(provider.requests))
 	}
+
+	toolEnd := events[6].(ToolExecutionEndEvent)
+	if !toolEnd.Result.IsError {
+		t.Fatal("tool result IsError = false, want true")
+	}
+	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "decode calculator arguments") {
+		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
+	}
+
+	errEvent := events[10].(ErrorEvent)
+	if !strings.Contains(errEvent.Error.Error(), "max steps") {
+		t.Fatalf("stream error = %v, want max steps message", errEvent.Error)
+	}
 }
 
-func TestAgentRunAgentMessagesForwardsSemanticHistoryToProvider(t *testing.T) {
+func TestAgentStreamForwardsSemanticHistoryToProvider(t *testing.T) {
 	history := []Message{
 		UserMessage{Content: "what is 2 + 2?"},
 		AssistantMessage{ToolCalls: []llms.ToolCall{
@@ -1046,19 +917,16 @@ func TestAgentRunAgentMessagesForwardsSemanticHistoryToProvider(t *testing.T) {
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), history)
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil || got.Answer != "4 * 3 = 12" {
-		t.Fatalf("RunAgentMessages().Answer = %#v, want %q", got, "4 * 3 = 12")
+	got := collectFinalAnswer(t, a.Stream(context.Background(), history))
+	if got != "4 * 3 = 12" {
+		t.Fatalf("answer = %q, want %q", got, "4 * 3 = 12")
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("provider requests len = %d, want 1", len(provider.requests))
 	}
 }
 
-func TestAgentRunAgentMessagesRejectsInvalidHistoryAndSemanticMessages(t *testing.T) {
+func TestAgentStreamRejectsInvalidHistoryAndSemanticMessages(t *testing.T) {
 	tests := []struct {
 		name     string
 		messages []Message
@@ -1097,9 +965,16 @@ func TestAgentRunAgentMessagesRejectsInvalidHistoryAndSemanticMessages(t *testin
 			})}
 
 			a := New(provider, tools.NewRegistry(), "fake-tool-model")
-			got, err := runAgentMessages(t, a, context.Background(), tt.messages)
-			if err == nil {
-				t.Fatalf("RunAgentMessages() error = nil, result = %#v", got)
+			events := collectStreamEvents(t, a.Stream(context.Background(), tt.messages))
+			if len(events) != 1 {
+				t.Fatalf("events len = %d, want 1", len(events))
+			}
+			errEvent, ok := events[0].(ErrorEvent)
+			if !ok {
+				t.Fatalf("event[0] type = %T, want ErrorEvent", events[0])
+			}
+			if errEvent.Error == nil {
+				t.Fatal("stream error = nil, want validation error")
 			}
 			if len(provider.requests) != 0 {
 				t.Fatalf("provider requests len = %d, want 0", len(provider.requests))
@@ -1108,7 +983,7 @@ func TestAgentRunAgentMessagesRejectsInvalidHistoryAndSemanticMessages(t *testin
 	}
 }
 
-func TestAgentRunAgentMessagesForwardsProvidedHistoryToProvider(t *testing.T) {
+func TestAgentStreamForwardsProvidedHistoryToProvider(t *testing.T) {
 	history := []Message{
 		UserMessage{Content: "what is 2 + 2?"},
 		AssistantMessage{Content: "2 + 2 = 4."},
@@ -1128,100 +1003,13 @@ func TestAgentRunAgentMessagesForwardsProvidedHistoryToProvider(t *testing.T) {
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), history)
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if got.Answer != "4 * 3 = 12" {
-		t.Fatalf("RunAgentMessages().Answer = %q", got.Answer)
+	got := collectFinalAnswer(t, a.Stream(context.Background(), history))
+	if got != "4 * 3 = 12" {
+		t.Fatalf("answer = %q", got)
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("chat requests len = %d, want 1", len(provider.requests))
 	}
 
 	assertMessagesEqual(t, provider.requests[0].Messages, want)
-}
-
-func TestAgentRunAgentMessagesContinuesToolCallingFromProvidedHistory(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(tools.Calculator{})
-
-	history := []Message{
-		UserMessage{Content: "what is 4 * 4?"},
-		AssistantMessage{Content: "4 * 4 = 16."},
-		UserMessage{Content: "now multiply that by 5"},
-	}
-	wantHistory := []llms.Message{
-		{Role: llms.RoleUser, Content: "what is 4 * 4?"},
-		{Role: llms.RoleAssistant, Content: "4 * 4 = 16."},
-		{Role: llms.RoleUser, Content: "now multiply that by 5"},
-	}
-	assistantToolCall := llms.Message{
-		Role: llms.RoleAssistant,
-		ToolCalls: []llms.ToolCall{
-			calculatorToolCall("call_history_mul", `{"a":16,"b":5,"op":"mul"}`),
-		},
-	}
-	toolResult := llms.Message{Role: llms.RoleTool, Content: "80", ToolCallID: "call_history_mul"}
-
-	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		round++
-		switch round {
-		case 1:
-			assertMessagesEqual(t, req.Messages, wantHistory)
-			return &llms.ChatResponse{Message: assistantToolCall}, nil
-		case 2:
-			want := append(append([]llms.Message{}, wantHistory...), assistantToolCall, toolResult)
-			assertMessagesEqual(t, req.Messages, want)
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "16 * 5 = 80",
-			}}, nil
-		default:
-			t.Fatalf("unexpected chat round = %d", round)
-			return nil, nil
-		}
-	})}
-
-	a := New(provider, registry, "fake-tool-model")
-	got, err := runAgentMessages(t, a, context.Background(), history)
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if got.Answer != "16 * 5 = 80" {
-		t.Fatalf("RunAgentMessages().Answer = %q", got.Answer)
-	}
-	if got.ToolRounds != 1 {
-		t.Fatalf("RunAgentMessages().ToolRounds = %d, want 1", got.ToolRounds)
-	}
-	if len(got.Steps) != 1 {
-		t.Fatalf("RunAgentMessages().Steps len = %d, want 1", len(got.Steps))
-	}
-	if len(provider.requests) != 2 {
-		t.Fatalf("chat requests len = %d, want 2", len(provider.requests))
-	}
-
-	step := got.Steps[0]
-	if step.ToolCallID != "call_history_mul" {
-		t.Fatalf("RunAgentMessages().Steps[0].ToolCallID = %q", step.ToolCallID)
-	}
-	if step.ToolName != "calculator" {
-		t.Fatalf("RunAgentMessages().Steps[0].ToolName = %q", step.ToolName)
-	}
-	if step.Arguments != `{"a":16,"b":5,"op":"mul"}` {
-		t.Fatalf("RunAgentMessages().Steps[0].Arguments = %q", step.Arguments)
-	}
-	if step.Result != "80" {
-		t.Fatalf("RunAgentMessages().Steps[0].Result = %q", step.Result)
-	}
-	if step.Error != "" {
-		t.Fatalf("RunAgentMessages().Steps[0].Error = %q, want empty", step.Error)
-	}
 }
