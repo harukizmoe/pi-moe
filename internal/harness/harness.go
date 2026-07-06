@@ -87,7 +87,7 @@ func (h *Harness) Stream(ctx context.Context, input string) <-chan Event {
 			emitHarnessError(ctx, stream, fmt.Errorf("empty input"))
 			return
 		}
-		for event := range h.agent.StreamAgentMessages(ctx, []agent.Message{agent.UserMessage{Content: input}}) {
+		for event := range h.agent.Stream(ctx, []agent.Message{agent.UserMessage{Content: input}}) {
 			if !emitHarnessEvent(ctx, stream, event) {
 				return
 			}
@@ -131,5 +131,94 @@ func (h *Harness) RunAgentMessages(ctx context.Context, messages []agent.Message
 		return nil, fmt.Errorf("empty input")
 	}
 
-	return h.agent.RunAgentMessages(ctx, messages)
+	return collectRunResult(ctx, messages, h.agent.Stream(ctx, messages))
+}
+
+func collectRunResult(ctx context.Context, history []agent.Message, stream <-chan Event) (*agent.RunResult, error) {
+	var (
+		result      *agent.RunResult
+		sawProgress bool
+		activeSteps = make(map[string]int)
+	)
+
+	ensureResult := func() *agent.RunResult {
+		if result == nil {
+			result = &agent.RunResult{Messages: cloneSessionMessages(history)}
+		}
+		return result
+	}
+
+	for event := range stream {
+		switch event := event.(type) {
+		case RunStartEvent, TurnStartEvent, MessageStartEvent, MessageDeltaEvent, TurnEndEvent:
+			sawProgress = true
+			ensureResult()
+		case MessageEndEvent:
+			sawProgress = true
+			runResult := ensureResult()
+			runResult.Messages = append(runResult.Messages, cloneAssistantMessage(event.Message))
+			if len(event.Message.ToolCalls) == 0 {
+				runResult.Answer = event.Message.Content
+			} else {
+				runResult.ToolRounds++
+			}
+		case ToolExecutionStartEvent:
+			sawProgress = true
+			runResult := ensureResult()
+			runResult.Steps = append(runResult.Steps, agent.Step{
+				ToolCallID: event.ToolCallID,
+				ToolName:   event.ToolName,
+				Arguments:  event.Arguments,
+			})
+			activeSteps[event.ToolCallID] = len(runResult.Steps) - 1
+		case ToolExecutionEndEvent:
+			sawProgress = true
+			runResult := ensureResult()
+			runResult.Messages = append(runResult.Messages, event.Result)
+			updateRunStep(runResult, activeSteps, event)
+		case RunEndEvent:
+			ensureResult()
+			return result, nil
+		case ErrorEvent:
+			if !sawProgress {
+				return nil, event.Error
+			}
+			return ensureResult(), event.Error
+		}
+	}
+
+	if ctx != nil && ctx.Err() != nil {
+		if !sawProgress {
+			return nil, ctx.Err()
+		}
+		return ensureResult(), ctx.Err()
+	}
+	if result != nil {
+		return result, nil
+	}
+	return nil, nil
+}
+
+func updateRunStep(result *agent.RunResult, activeSteps map[string]int, event ToolExecutionEndEvent) {
+	index, ok := activeSteps[event.ToolCallID]
+	if !ok {
+		result.Steps = append(result.Steps, agent.Step{
+			ToolCallID: event.ToolCallID,
+			ToolName:   event.Result.ToolName,
+		})
+		index = len(result.Steps) - 1
+	}
+
+	step := &result.Steps[index]
+	if step.ToolName == "" {
+		step.ToolName = event.Result.ToolName
+	}
+	if event.Error != nil {
+		step.Error = event.Error.Error()
+		step.Result = ""
+	} else {
+		step.Result = event.Result.Content
+		step.Error = ""
+	}
+	delete(activeSteps, event.ToolCallID)
 }

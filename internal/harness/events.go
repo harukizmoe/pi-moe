@@ -8,20 +8,38 @@ type Event = agent.Event
 // RunStartEvent 表示 Agent 已开始一次运行。
 type RunStartEvent = agent.RunStartEvent
 
-// LLMRequestEvent 表示 Agent 即将向 Provider 发起一次聊天请求。
-type LLMRequestEvent = agent.LLMRequestEvent
+// TurnStartEvent 表示 Agent 已开始处理当前用户 turn。
+type TurnStartEvent = agent.TurnStartEvent
 
-// LLMErrorEvent 表示 Provider 聊天请求返回错误。
-type LLMErrorEvent = agent.LLMErrorEvent
+// MessageStartEvent 表示一条 assistant message 开始生成。
+type MessageStartEvent = agent.MessageStartEvent
 
-// ToolCallEvent 表示模型已请求执行本地工具。
-type ToolCallEvent = agent.ToolCallEvent
+// MessageDeltaEvent 表示一条 assistant message 的增量内容。
+type MessageDeltaEvent = agent.MessageDeltaEvent
 
-// ToolResultEvent 表示本地工具已返回结果。
-type ToolResultEvent = agent.ToolResultEvent
+// MessageDeltaKind 标识一段 message 增量属于可见文本、thinking 还是 tool call 参数。
+type MessageDeltaKind = agent.MessageDeltaKind
 
-// FinalEvent 表示 Agent 已得到最终回答。
-type FinalEvent = agent.FinalEvent
+const (
+	// MessageDeltaText 表示 assistant 可见文本增量。
+	MessageDeltaText = agent.MessageDeltaText
+	// MessageDeltaThinking 表示模型 reasoning/thinking 增量。
+	MessageDeltaThinking = agent.MessageDeltaThinking
+	// MessageDeltaToolCall 表示 assistant tool call 参数增量。
+	MessageDeltaToolCall = agent.MessageDeltaToolCall
+)
+
+// MessageEndEvent 表示一条 assistant message 已完整生成。
+type MessageEndEvent = agent.MessageEndEvent
+
+// ToolExecutionStartEvent 表示本地工具开始执行。
+type ToolExecutionStartEvent = agent.ToolExecutionStartEvent
+
+// ToolExecutionEndEvent 表示本地工具已返回结果。
+type ToolExecutionEndEvent = agent.ToolExecutionEndEvent
+
+// TurnEndEvent 表示当前用户 turn 已结束。
+type TurnEndEvent = agent.TurnEndEvent
 
 // RunEndEvent 表示 Agent 已成功结束一次运行。
 type RunEndEvent = agent.RunEndEvent

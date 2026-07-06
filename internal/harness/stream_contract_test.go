@@ -66,62 +66,86 @@ func TestStreamReturnsTypedToolCallingEvents(t *testing.T) {
 	h := newFakeHarness(t)
 	events := collectHarnessStreamEvents(t, h.Stream(context.Background(), "use calculator to compute 13 * 7"))
 
-	if len(events) != 7 {
-		t.Fatalf("stream events len = %d, want 7", len(events))
+	assertHarnessEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		TurnEndEvent{},
+		RunEndEvent{},
+	)
+
+	turnStart := events[1].(TurnStartEvent)
+	if turnStart.Turn != 1 {
+		t.Fatalf("TurnStartEvent.Turn = %d, want 1", turnStart.Turn)
+	}
+	if turnStart.UserMessage.Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("TurnStartEvent.UserMessage.Content = %q", turnStart.UserMessage.Content)
 	}
 
-	if _, ok := events[0].(RunStartEvent); !ok {
-		t.Fatalf("event[0] = %T, want RunStartEvent", events[0])
+	toolCallDelta := events[3].(MessageDeltaEvent)
+	if toolCallDelta.Kind != MessageDeltaToolCall {
+		t.Fatalf("tool-call delta kind = %q, want %q", toolCallDelta.Kind, MessageDeltaToolCall)
 	}
-	if _, ok := events[1].(LLMRequestEvent); !ok {
-		t.Fatalf("event[1] = %T, want LLMRequestEvent", events[1])
-	}
-
-	toolCall, ok := events[2].(ToolCallEvent)
-	if !ok {
-		t.Fatalf("event[2] = %T, want ToolCallEvent", events[2])
-	}
-	if toolCall.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolCallEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
-	}
-	if toolCall.ToolName != "calculator" {
-		t.Fatalf("ToolCallEvent.ToolName = %q, want calculator", toolCall.ToolName)
-	}
-	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolCallEvent.Arguments = %q", toolCall.Arguments)
+	if toolCallDelta.Delta != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("tool-call delta = %q", toolCallDelta.Delta)
 	}
 
-	toolResult, ok := events[3].(ToolResultEvent)
-	if !ok {
-		t.Fatalf("event[3] = %T, want ToolResultEvent", events[3])
+	assistantWithTool := events[4].(MessageEndEvent).Message
+	if len(assistantWithTool.ToolCalls) != 1 {
+		t.Fatalf("assistant tool calls len = %d, want 1", len(assistantWithTool.ToolCalls))
 	}
+	if assistantWithTool.ToolCalls[0].ID != "call_fake_calculator" {
+		t.Fatalf("assistant tool call id = %q, want %q", assistantWithTool.ToolCalls[0].ID, "call_fake_calculator")
+	}
+
+	toolStart := events[5].(ToolExecutionStartEvent)
+	if toolStart.ToolCallID != "call_fake_calculator" {
+		t.Fatalf("ToolExecutionStartEvent.ToolCallID = %q, want %q", toolStart.ToolCallID, "call_fake_calculator")
+	}
+	if toolStart.ToolName != "calculator" {
+		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolStart.ToolName)
+	}
+	if toolStart.Arguments != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolStart.Arguments)
+	}
+
+	toolResult := events[6].(ToolExecutionEndEvent)
 	if toolResult.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolResultEvent.ToolCallID = %q, want %q", toolResult.ToolCallID, "call_fake_calculator")
+		t.Fatalf("ToolExecutionEndEvent.ToolCallID = %q, want %q", toolResult.ToolCallID, "call_fake_calculator")
 	}
-	if toolResult.ToolName != "calculator" {
-		t.Fatalf("ToolResultEvent.ToolName = %q, want calculator", toolResult.ToolName)
+	if toolResult.Result.ToolName != "calculator" {
+		t.Fatalf("ToolExecutionEndEvent.Result.ToolName = %q, want calculator", toolResult.Result.ToolName)
 	}
-	if toolResult.Result != "91" {
-		t.Fatalf("ToolResultEvent.Result = %q, want 91", toolResult.Result)
+	if toolResult.Result.Content != "91" {
+		t.Fatalf("ToolExecutionEndEvent.Result.Content = %q, want 91", toolResult.Result.Content)
 	}
 	if toolResult.Error != nil {
-		t.Fatalf("ToolResultEvent.Error = %v, want nil", toolResult.Error)
+		t.Fatalf("ToolExecutionEndEvent.Error = %v, want nil", toolResult.Error)
 	}
 
-	if _, ok := events[4].(LLMRequestEvent); !ok {
-		t.Fatalf("event[4] = %T, want second LLMRequestEvent", events[4])
+	finalDelta := events[8].(MessageDeltaEvent)
+	if finalDelta.Kind != MessageDeltaText {
+		t.Fatalf("final delta kind = %q, want %q", finalDelta.Kind, MessageDeltaText)
+	}
+	if finalDelta.Delta != "13 * 7 = 91" {
+		t.Fatalf("final delta = %q, want %q", finalDelta.Delta, "13 * 7 = 91")
 	}
 
-	final, ok := events[5].(FinalEvent)
-	if !ok {
-		t.Fatalf("event[5] = %T, want FinalEvent", events[5])
-	}
-	if final.Answer != "13 * 7 = 91" {
-		t.Fatalf("FinalEvent.Answer = %q, want %q", final.Answer, "13 * 7 = 91")
+	final := events[9].(MessageEndEvent)
+	if final.Message.Content != "13 * 7 = 91" {
+		t.Fatalf("MessageEndEvent.Message.Content = %q, want %q", final.Message.Content, "13 * 7 = 91")
 	}
 
-	if _, ok := events[6].(RunEndEvent); !ok {
-		t.Fatalf("event[6] = %T, want RunEndEvent", events[6])
+	turnEnd := events[10].(TurnEndEvent)
+	if turnEnd.Turn != 1 {
+		t.Fatalf("TurnEndEvent.Turn = %d, want 1", turnEnd.Turn)
 	}
 }
 
