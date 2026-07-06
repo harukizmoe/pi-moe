@@ -22,14 +22,14 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
       model: fake-tool-model
 `)
 
-	var events []agent.Event
+	var events []Event
 	h, err := New(context.Background(), Config{
 		ProviderConfigPath: providerConfigPath,
 		Logger:             logger.NewNoop(),
 		MaxSteps:           1,
-		OnEvent: func(event agent.Event) {
+		OnEvent: EventHandler(func(event Event) {
 			events = append(events, event)
-		},
+		}),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -66,7 +66,15 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 		t.Fatalf("Run().Steps[0].Error = %q, want empty", step.Error)
 	}
 
-	wantEventTypes := []agent.EventType{agent.EventToolCall, agent.EventToolResult, agent.EventFinal}
+	wantEventTypes := []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventToolCall,
+		EventToolResult,
+		EventLLMRequest,
+		EventFinal,
+		EventRunEnd,
+	}
 	if len(events) != len(wantEventTypes) {
 		t.Fatalf("events len = %d, want %d", len(events), len(wantEventTypes))
 	}
@@ -369,6 +377,7 @@ func newFakeHarness(t *testing.T) *Harness {
 	}
 	return h
 }
+
 func writeProvidersConfig(t *testing.T, content string) string {
 	t.Helper()
 

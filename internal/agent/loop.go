@@ -50,11 +50,13 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 	toolSchemas := a.tools.Schemas()
 
 	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", strings.TrimSpace(lastMessage.Content))
+	a.emit(Event{Type: EventRunStart, Message: strings.TrimSpace(lastMessage.Content)})
 	for chatRound := 0; ; chatRound++ {
 		llmMessages, err := toLLMMessages(messages)
 		if err != nil {
 			return result, err
 		}
+		a.emit(Event{Type: EventLLMRequest, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1})
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
 			Model:    a.model,
@@ -63,7 +65,10 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 		})
 		if err != nil {
 			a.logLLMError(ctx, chatRound, err)
-			return result, fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
+			a.emit(Event{Type: EventLLMError, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1, Error: err})
+			runErr := fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
+			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			return result, runErr
 		}
 
 		assistantMessage := AssistantMessage{
@@ -71,25 +76,30 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 			ToolCalls: append([]llms.ToolCall(nil), response.Message.ToolCalls...),
 		}
 		if _, err := toLLMMessage(assistantMessage); err != nil {
-			return result, fmt.Errorf("assistant response: %w", err)
+			runErr := fmt.Errorf("assistant response: %w", err)
+			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			return result, runErr
 		}
 		if len(assistantMessage.ToolCalls) == 0 {
 			result.Answer = assistantMessage.Content
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
 			a.emit(Event{Type: EventFinal, Message: assistantMessage.Content})
+			a.emit(Event{Type: EventRunEnd, Message: assistantMessage.Content})
 			return result, nil
 		}
 
 		if result.ToolRounds >= a.maxSteps {
 			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
-			return result, fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)
+			runErr := fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)
+			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			return result, runErr
 		}
 
 		a.logger.Info(ctx, "agent.tool_calls.received", "count", len(assistantMessage.ToolCalls))
 		messages = append(messages, assistantMessage)
 		for _, call := range assistantMessage.ToolCalls {
 			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "arguments", call.Function.Arguments)
-			a.emit(Event{Type: EventToolCall, Message: call.Function.Name})
+			a.emit(Event{Type: EventToolCall, Message: call.Function.Name, ToolName: call.Function.Name, ToolCallID: call.ID})
 
 			step := Step{ToolCallID: call.ID, ToolName: call.Function.Name, Arguments: call.Function.Arguments}
 			toolMessage, err := a.runToolCall(ctx, call)
@@ -102,7 +112,7 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 				result.Steps = append(result.Steps, step)
 				a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			}
-			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content})
+			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content, ToolName: call.Function.Name, ToolCallID: call.ID, IsError: err != nil, Error: err})
 			messages = append(messages, toolMessage)
 		}
 		result.ToolRounds++
@@ -123,6 +133,10 @@ func (a *Agent) logLLMError(ctx context.Context, chatRound int, err error) {
 		return
 	}
 	a.logger.Error(ctx, "agent.llm.final.error", "error", err)
+}
+
+func chatRoundEventMessage(chatRound int) string {
+	return fmt.Sprintf("chat round %d", chatRound+1)
 }
 
 func (a *Agent) emit(event Event) {

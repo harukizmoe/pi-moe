@@ -20,7 +20,7 @@
 ### 反馈与经验沉淀
 
 - 用户指出错误后，先修正当前问题，再判断是否需要记录到 `docs/evolution/lessons.md`。
-- 项目开发中发现可复用的架构判断、边界规则、踩坑经验或从 OMP 学到的新模式时，要自主更新 `docs/evolution/lessons.md`。
+- 项目开发中发现可复用的架构判断、边界规则、踩坑经验或从 OMP/Tau 等参考项目学到的新模式时，要自主更新 `docs/evolution/lessons.md`。
 - 只记录会再次影响本项目的经验；不要把一次性偏好或临时决策写成永久规则。
 - 经验必须具体到触发条件和正确做法。
 
@@ -49,6 +49,8 @@
 - 保持实现简单：先跑通最小闭环，再扩展 HTTP、数据层、记忆、流式输出等能力。
 - 优先复用当前模块，不新增平行抽象；没有明确需要时不引入新目录、新接口或新依赖。
 - Go 代码必须保持小包、清晰边界、显式错误处理和 `context.Context` 传递。
+- 当提问`推荐下一步开发`时，参考 OMP/Tau 项目的设计经验，发掘本项目的不足，推荐下一步开发计划
+- 一次完整阶段开发完成时，自主推荐下一步开发计划，依旧可参考 OMP/Tau 项目设计经验
 
 ## 注释规范
 
@@ -61,12 +63,13 @@
 
 ## 模块边界
 
-- `internal/llms` 对应 `oh-my-pi/packages/ai` 的 AI 层：统一 LLM 类型、Provider 接口、Provider 注册、OpenAI-compatible 协议适配。
+- `internal/llms` 对应 OMP/Tau 的 AI/provider 层：统一 LLM 类型、Provider 接口、Provider 注册、OpenAI-compatible 协议适配。
 - 不新增 `internal/ai`；LLM 协议相关代码都放在 `internal/llms`。
 - `internal/agent` 只负责 Agent 主循环和 tool calling 流程，不处理配置读取、HTTP 路由或具体 Provider HTTP 细节。
 - `internal/tools` 只负责工具接口、工具注册、schema 暴露和工具执行。
 - `internal/config` 负责 Viper 读取 YAML 和环境变量；其他业务包不直接依赖 Viper。
 - `internal/logger` 负责统一日志接口和开发期输出；业务包通过接口注入，不直接操作 `slog`。
+- `internal/harness` 负责组装 config、Provider、tools 和 Agent；CLI/API 只能调用 harness，不重复装配依赖。
 - `internal/application` 保留给后续 HTTP/business 入口；CLI 闭环跑通前不要扩展 router、middleware、data。
 
 ## 配置约定

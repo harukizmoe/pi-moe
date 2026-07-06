@@ -25,7 +25,7 @@ type Config struct {
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
 	MaxSteps int
 	// OnEvent 接收 Agent 运行事件；为空时不发送事件。
-	OnEvent agent.EventHandler
+	OnEvent EventHandler
 }
 
 // Harness 是后端入口可复用的 Agent 运行内核。

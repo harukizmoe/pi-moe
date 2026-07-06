@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -393,14 +394,93 @@ func TestAgentRunReturnsMaxStepsErrorWhenToolLoopExceedsLimit(t *testing.T) {
 	}
 }
 
-func TestAgentRunEmitsOrderedToolAndFinalEvents(t *testing.T) {
-	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
+func assertEventTypes(t *testing.T, events []Event, want []EventType) {
+	t.Helper()
+
+	if len(events) != len(want) {
+		t.Fatalf("events len = %d, want %d", len(events), len(want))
+	}
+	for i, wantType := range want {
+		if events[i].Type != wantType {
+			t.Fatalf("event[%d].Type = %q, want %q", i, events[i].Type, wantType)
+		}
+	}
+}
+
+func TestAgentRunEmitsRunLifecycleEventsWithoutTools(t *testing.T) {
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		return &llms.ChatResponse{Message: llms.Message{
+			Role:    llms.RoleAssistant,
+			Content: "done without tools",
+		}}, nil
+	})}
+
+	var events []Event
+	a := NewWithOptions(provider, tools.NewRegistry(), "fake-tool-model", Options{
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	got, err := a.Run(context.Background(), "just answer directly")
 	if err != nil {
-		t.Fatalf("NewFakeProvider() error = %v", err)
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "done without tools" {
+		t.Fatalf("Run() answer = %q", got)
 	}
 
+	assertEventTypes(t, events, []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventFinal,
+		EventRunEnd,
+	})
+	if events[0].Message != "just answer directly" {
+		t.Fatalf("run_start.Message = %q, want %q", events[0].Message, "just answer directly")
+	}
+	if events[0].ToolName != "" || events[0].ToolCallID != "" || events[0].Error != nil {
+		t.Fatalf("run_start metadata = %#v, want empty tool metadata and nil error", events[0])
+	}
+	if events[1].Message != "chat round 1" {
+		t.Fatalf("first llm_request.Message = %q, want %q", events[1].Message, "chat round 1")
+	}
+	if events[1].ChatRound != 1 || events[1].ToolName != "" || events[1].ToolCallID != "" || events[1].Error != nil {
+		t.Fatalf("first llm_request metadata = %#v, want chat round 1 with empty tool metadata and nil error", events[1])
+	}
+	if events[2].Message != got {
+		t.Fatalf("final.Message = %q, want %q", events[2].Message, got)
+	}
+	if events[3].Message != got {
+		t.Fatalf("run_end.Message = %q, want %q", events[3].Message, got)
+	}
+}
+
+func TestAgentRunEmitsToolCallContractEvents(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_mul", `{"a":13,"b":7,"op":"mul"}`),
+				},
+			}}, nil
+		case 2:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "13 * 7 = 91",
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
 
 	var events []Event
 	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
@@ -418,17 +498,225 @@ func TestAgentRunEmitsOrderedToolAndFinalEvents(t *testing.T) {
 		t.Fatalf("Run() answer = %q", got)
 	}
 
-	wantTypes := []EventType{EventToolCall, EventToolResult, EventFinal}
-	if len(events) != len(wantTypes) {
-		t.Fatalf("events len = %d, want %d", len(events), len(wantTypes))
+	assertEventTypes(t, events, []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventToolCall,
+		EventToolResult,
+		EventLLMRequest,
+		EventFinal,
+		EventRunEnd,
+	})
+	if events[0].Message != "use calculator to compute 13 * 7" {
+		t.Fatalf("run_start.Message = %q, want input", events[0].Message)
 	}
-	for i, wantType := range wantTypes {
-		if events[i].Type != wantType {
-			t.Fatalf("event[%d].Type = %q, want %q", i, events[i].Type, wantType)
+	if events[1].Message != "chat round 1" {
+		t.Fatalf("first llm_request.Message = %q, want %q", events[1].Message, "chat round 1")
+	}
+	if events[1].ChatRound != 1 {
+		t.Fatalf("first llm_request.ChatRound = %d, want 1", events[1].ChatRound)
+	}
+	if events[2].Message != "calculator" || events[2].ToolName != "calculator" || events[2].ToolCallID != "call_mul" || events[2].Error != nil {
+		t.Fatalf("tool_call event = %#v, want calculator metadata", events[2])
+	}
+	if events[3].Message != "91" || events[3].ToolName != "calculator" || events[3].ToolCallID != "call_mul" || events[3].Error != nil || events[3].IsError {
+		t.Fatalf("tool_result event = %#v, want successful calculator result with IsError false", events[3])
+	}
+	if events[4].Message != "chat round 2" {
+		t.Fatalf("second llm_request.Message = %q, want %q", events[4].Message, "chat round 2")
+	}
+	if events[4].ChatRound != 2 {
+		t.Fatalf("second llm_request.ChatRound = %d, want 2", events[4].ChatRound)
+	}
+	if events[5].Message != got {
+		t.Fatalf("final.Message = %q, want %q", events[5].Message, got)
+	}
+	if events[6].Message != got {
+		t.Fatalf("run_end.Message = %q, want %q", events[6].Message, got)
+	}
+}
+
+func TestAgentRunEmitsProviderFailureEventsWithoutRunEnd(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		return nil, providerErr
+	})}
+
+	var events []Event
+	a := NewWithOptions(provider, tools.NewRegistry(), "fake-tool-model", Options{
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	got, err := a.Run(context.Background(), "answer fails upstream")
+	if err == nil {
+		t.Fatal("Run() error = nil, want provider failure")
+	}
+	if got != "" {
+		t.Fatalf("Run() answer = %q, want empty string on provider failure", got)
+	}
+
+	assertEventTypes(t, events, []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventLLMError,
+		EventAgentError,
+	})
+	if events[0].Message != "answer fails upstream" {
+		t.Fatalf("run_start.Message = %q, want input", events[0].Message)
+	}
+	if events[1].Message != "chat round 1" {
+		t.Fatalf("llm_request.Message = %q, want %q", events[1].Message, "chat round 1")
+	}
+	if events[2].ChatRound != 1 || events[2].Message == "" || events[2].ToolName != "" || events[2].ToolCallID != "" || events[2].Error == nil || !strings.Contains(events[2].Error.Error(), providerErr.Error()) {
+		t.Fatalf("llm_error event = %#v, want chat round 1 provider failure details", events[2])
+	}
+	if events[3].Message != err.Error() || events[3].Error == nil || !strings.Contains(events[3].Error.Error(), providerErr.Error()) {
+		t.Fatalf("agent_error event = %#v, want surfaced run error %q", events[3], err.Error())
+	}
+}
+
+func TestAgentRunEmitsAgentErrorEventWhenMaxStepsExceeded(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
+				},
+			}}, nil
+		case 2:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
+				},
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
 		}
+	})}
+
+	var events []Event
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
+		MaxSteps: 1,
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	got, err := a.Run(context.Background(), "compute (2 + 3) * 4")
+	if err == nil {
+		t.Fatal("Run() error = nil, want max-steps failure")
 	}
-	if events[len(events)-1].Message != got {
-		t.Fatalf("final event message = %q, want %q", events[len(events)-1].Message, got)
+	if got != "" {
+		t.Fatalf("Run() answer = %q, want empty string on max-steps failure", got)
+	}
+
+	assertEventTypes(t, events, []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventToolCall,
+		EventToolResult,
+		EventLLMRequest,
+		EventAgentError,
+	})
+	if events[2].ToolName != "calculator" || events[2].ToolCallID != "call_step_1" {
+		t.Fatalf("tool_call event = %#v, want first tool metadata", events[2])
+	}
+	if events[3].Message != "5" || events[3].ToolName != "calculator" || events[3].ToolCallID != "call_step_1" || events[3].Error != nil {
+		t.Fatalf("tool_result event = %#v, want first successful tool result", events[3])
+	}
+	if events[4].Message != "chat round 2" {
+		t.Fatalf("second llm_request.Message = %q, want %q", events[4].Message, "chat round 2")
+	}
+	if events[5].Message != err.Error() || events[5].Error == nil || !strings.Contains(events[5].Error.Error(), "max steps") {
+		t.Fatalf("agent_error event = %#v, want max-steps summary %q", events[5], err.Error())
+	}
+}
+
+func TestAgentRunEmitsToolErrorResultAndStillEndsWithFinalAnswer(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+
+	round := 0
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		round++
+		switch round {
+		case 1:
+			return &llms.ChatResponse{Message: llms.Message{
+				Role: llms.RoleAssistant,
+				ToolCalls: []llms.ToolCall{
+					calculatorToolCall("call_bad_args", `{"a":1`),
+				},
+			}}, nil
+		case 2:
+			got := req.Messages[len(req.Messages)-1]
+			if got.Role != llms.RoleTool || got.ToolCallID != "call_bad_args" {
+				t.Fatalf("second request last message = %#v, want tool failure for call_bad_args", got)
+			}
+			if !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
+				t.Fatalf("second request tool content = %q, want sanitized calculator failure", got.Content)
+			}
+			return &llms.ChatResponse{Message: llms.Message{
+				Role:    llms.RoleAssistant,
+				Content: "I couldn't use calculator because the arguments were malformed.",
+			}}, nil
+		default:
+			t.Fatalf("unexpected chat round = %d", round)
+			return nil, nil
+		}
+	})}
+
+	var events []Event
+	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	got, err := a.Run(context.Background(), "try calculator with bad arguments")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got != "I couldn't use calculator because the arguments were malformed." {
+		t.Fatalf("Run() answer = %q", got)
+	}
+
+	assertEventTypes(t, events, []EventType{
+		EventRunStart,
+		EventLLMRequest,
+		EventToolCall,
+		EventToolResult,
+		EventLLMRequest,
+		EventFinal,
+		EventRunEnd,
+	})
+	if events[2].Message != "calculator" || events[2].ToolName != "calculator" || events[2].ToolCallID != "call_bad_args" || events[2].Error != nil {
+		t.Fatalf("tool_call event = %#v, want failing calculator metadata", events[2])
+	}
+	if !strings.HasPrefix(events[3].Message, `tool "calculator" failed: `) {
+		t.Fatalf("tool_result.Message = %q, want sanitized tool failure", events[3].Message)
+	}
+	if events[3].ToolName != "calculator" || events[3].ToolCallID != "call_bad_args" || !events[3].IsError || events[3].Error == nil || !strings.Contains(events[3].Error.Error(), "decode calculator arguments") {
+		t.Fatalf("tool_result event = %#v, want tool failure metadata with IsError true", events[3])
+	}
+	if events[4].Message != "chat round 2" {
+		t.Fatalf("second llm_request.Message = %q, want %q", events[4].Message, "chat round 2")
+	}
+	if events[5].Message != got {
+		t.Fatalf("final.Message = %q, want %q", events[5].Message, got)
+	}
+	if events[6].Message != got {
+		t.Fatalf("run_end.Message = %q, want %q", events[6].Message, got)
 	}
 }
 
