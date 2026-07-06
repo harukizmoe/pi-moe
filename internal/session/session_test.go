@@ -1,22 +1,140 @@
-package harness
+package session
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/llms"
+	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/tools"
 )
 
-func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
-	h := newFakeHarness(t)
-	session := h.NewSession()
+func TestNewPromptUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
 
-	events := collectHarnessStreamEvents(t, session.Prompt(context.Background(), "use calculator to compute 13 * 7"))
-	assertHarnessEventTypes(t, events,
+	s, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	answer := collectSessionAnswer(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	if answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
+	}
+}
+
+func TestNewUsesProviderNameOverride(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: bad-default
+  providers:
+    bad-default:
+      type: does_not_exist
+      model: broken-model
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	s, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		ProviderName:       "fake-local",
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	answer := collectSessionAnswer(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	if answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
+	}
+}
+
+func TestNewReturnsErrorWhenProviderNameMissing(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	_, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		ProviderName:       "missing-provider",
+		Logger:             logger.NewNoop(),
+	})
+	if err == nil {
+		t.Fatal("New() error = nil, want unknown provider error")
+	}
+	if !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("New() error = %v, want unknown provider message", err)
+	}
+}
+
+func TestNewReturnsErrorWhenDefaultProviderMissing(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: missing-provider
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	_, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+	})
+	if err == nil {
+		t.Fatal("New() error = nil, want unknown provider error")
+	}
+	if !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("New() error = %v, want unknown provider message", err)
+	}
+}
+
+func TestNewReturnsErrorWhenProviderTypeUnknown(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: bad-provider
+  providers:
+    bad-provider:
+      type: does_not_exist
+      model: fake-tool-model
+`)
+
+	_, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+	})
+	if err == nil {
+		t.Fatal("New() error = nil, want unknown llm provider type error")
+	}
+	if !strings.Contains(err.Error(), "unknown llm provider type") {
+		t.Fatalf("New() error = %v, want unknown llm provider type message", err)
+	}
+}
+
+func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
+	s := newFakeSession(t)
+
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	assertSessionEventTypes(t, events,
 		RunStartEvent{},
 		TurnStartEvent{},
 		MessageStartEvent{},
@@ -31,7 +149,7 @@ func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
 		RunEndEvent{},
 	)
 
-	messages := session.Messages()
+	messages := s.Messages()
 	if len(messages) != 4 {
 		t.Fatalf("Messages() len = %d, want 4: %#v", len(messages), messages)
 	}
@@ -56,17 +174,16 @@ func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
 }
 
 func TestSessionMessagesReturnsDefensiveSnapshot(t *testing.T) {
-	h := newFakeHarness(t)
-	session := h.NewSession()
-	collectHarnessStreamEvents(t, session.Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	s := newFakeSession(t)
+	collectSessionStreamEvents(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
 
-	first := session.Messages()
+	first := s.Messages()
 	first[0] = agent.UserMessage{Content: "mutated"}
 	assistantMessage := first[1].(agent.AssistantMessage)
 	assistantMessage.ToolCalls[0].Function.Arguments = "mutated"
 	first[1] = assistantMessage
 
-	second := session.Messages()
+	second := s.Messages()
 	if got := second[0].(agent.UserMessage).Content; got != "use calculator to compute 13 * 7" {
 		t.Fatalf("Messages()[0].Content after caller mutation = %q", got)
 	}
@@ -77,10 +194,9 @@ func TestSessionMessagesReturnsDefensiveSnapshot(t *testing.T) {
 }
 
 func TestSessionPromptRejectsEmptyInputWithoutTranscriptMutation(t *testing.T) {
-	h := newFakeHarness(t)
-	session := h.NewSession()
+	s := newFakeSession(t)
 
-	events := collectHarnessStreamEvents(t, session.Prompt(context.Background(), " \n\t "))
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), " \n\t "))
 	if len(events) != 1 {
 		t.Fatalf("events len = %d, want 1", len(events))
 	}
@@ -91,24 +207,23 @@ func TestSessionPromptRejectsEmptyInputWithoutTranscriptMutation(t *testing.T) {
 	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "empty input") {
 		t.Fatalf("ErrorEvent.Error = %v, want empty input", errEvent.Error)
 	}
-	if messages := session.Messages(); len(messages) != 0 {
+	if messages := s.Messages(); len(messages) != 0 {
 		t.Fatalf("Messages() len = %d, want 0", len(messages))
 	}
 }
 
 func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testing.T) {
 	provider := newBlockingProvider()
-	h := &Harness{agent: agent.New(provider, tools.NewRegistry(), "blocking-model")}
-	session := h.NewSession()
+	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model"), listeners: make(map[chan Event]struct{})}
 
-	first := session.Prompt(context.Background(), "first prompt")
+	first := s.Prompt(context.Background(), "first prompt")
 	firstDone := make(chan []Event, 1)
 	go func() {
-		firstDone <- collectHarnessStreamEvents(t, first)
+		firstDone <- collectSessionStreamEvents(t, first)
 	}()
 	<-provider.started
 
-	secondEvents := collectHarnessStreamEvents(t, session.Prompt(context.Background(), "second prompt"))
+	secondEvents := collectSessionStreamEvents(t, s.Prompt(context.Background(), "second prompt"))
 	if len(secondEvents) != 1 {
 		t.Fatalf("second prompt events len = %d, want 1", len(secondEvents))
 	}
@@ -120,7 +235,7 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 		t.Fatalf("second ErrorEvent.Error = %v, want active turn", errEvent.Error)
 	}
 
-	messagesDuringFirstPrompt := session.Messages()
+	messagesDuringFirstPrompt := s.Messages()
 	if len(messagesDuringFirstPrompt) != 1 {
 		t.Fatalf("Messages() len while first prompt active = %d, want 1", len(messagesDuringFirstPrompt))
 	}
@@ -131,7 +246,7 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 	close(provider.release)
 	<-firstDone
 
-	messagesAfterFirstPrompt := session.Messages()
+	messagesAfterFirstPrompt := s.Messages()
 	if len(messagesAfterFirstPrompt) != 2 {
 		t.Fatalf("Messages() len after first prompt = %d, want 2", len(messagesAfterFirstPrompt))
 	}
@@ -144,10 +259,9 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 	provider := &maxStepLoopProvider{t: t}
-	h := &Harness{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1})}
-	session := h.NewSession()
+	s := &Session{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1}), listeners: make(map[chan Event]struct{})}
 
-	events := collectHarnessStreamEvents(t, session.Prompt(context.Background(), "compute (2 + 3) * 4"))
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "compute (2 + 3) * 4"))
 	errEvent, ok := events[len(events)-1].(ErrorEvent)
 	if !ok {
 		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
@@ -156,7 +270,7 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 		t.Fatalf("ErrorEvent.Error = %v, want max steps", errEvent.Error)
 	}
 
-	messages := session.Messages()
+	messages := s.Messages()
 	if len(messages) != 3 {
 		t.Fatalf("Messages() len = %d, want 3 without dangling over-limit assistant: %#v", len(messages), messages)
 	}
@@ -167,6 +281,57 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 	if _, ok := messages[2].(agent.ToolResultMessage); !ok {
 		t.Fatalf("Messages()[2] = %T, want ToolResultMessage", messages[2])
 	}
+}
+
+func newFakeSession(t *testing.T) *Session {
+	t.Helper()
+
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	s, err := New(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return s
+}
+
+func collectSessionAnswer(t *testing.T, stream <-chan Event) string {
+	t.Helper()
+
+	var answer string
+	for event := range stream {
+		switch event := event.(type) {
+		case MessageEndEvent:
+			if len(event.Message.ToolCalls) == 0 {
+				answer = event.Message.Content
+			}
+		case ErrorEvent:
+			if event.Error != nil {
+				t.Fatalf("stream error = %v", event.Error)
+			}
+		}
+	}
+	return answer
+}
+
+func writeProvidersConfig(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "providers.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write providers config: %v", err)
+	}
+	return path
 }
 
 type maxStepLoopProvider struct {
@@ -239,7 +404,7 @@ func (p *blockingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llm
 	}
 }
 
-func assertHarnessEventTypes(t *testing.T, events []Event, want ...Event) {
+func assertSessionEventTypes(t *testing.T, events []Event, want ...Event) {
 	t.Helper()
 	if len(events) != len(want) {
 		t.Fatalf("events len = %d, want %d: %#v", len(events), len(want), events)

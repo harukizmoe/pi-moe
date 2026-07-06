@@ -1,10 +1,9 @@
-package harness
+package agent
 
 import (
 	"context"
 	"fmt"
 
-	"harukizmoe/pimoe/internal/agent"
 	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
@@ -13,7 +12,7 @@ import (
 
 const defaultProviderConfigPath = "configs/providers.yaml"
 
-// Config 保存创建 Agent harness 所需的运行时依赖配置。
+// Config 保存创建已装配 Agent 所需的运行时依赖配置。
 type Config struct {
 	// ProviderConfigPath 是 providers YAML 配置路径；为空时使用默认本地配置。
 	ProviderConfigPath string
@@ -25,16 +24,11 @@ type Config struct {
 	MaxSteps int
 }
 
-// Harness 是后端入口可复用的 Agent 运行内核。
-type Harness struct {
-	agent *agent.Agent
-}
-
-// New 从配置文件组装 Provider、工具注册表和 Agent。
-func New(ctx context.Context, cfg Config) (*Harness, error) {
+// NewConfigured 从配置文件组装 Provider、工具注册表和 Agent。
+func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("create harness: %w", err)
+			return nil, fmt.Errorf("create agent: %w", err)
 		}
 	}
 
@@ -69,27 +63,8 @@ func New(ctx context.Context, cfg Config) (*Harness, error) {
 	toolRegistry := tools.NewRegistry()
 	toolRegistry.Register(tools.Calculator{})
 
-	runner := agent.NewWithOptions(provider, toolRegistry, providerConfig.Model, agent.Options{
+	return NewWithOptions(provider, toolRegistry, providerConfig.Model, Options{
 		Logger:   cfg.Logger,
 		MaxSteps: cfg.MaxSteps,
-	})
-
-	return &Harness{agent: runner}, nil
+	}), nil
 }
-
-
-func emitHarnessEvent(ctx context.Context, stream chan<- Event, event Event) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Err() != nil {
-		return false
-	}
-	select {
-	case stream <- event:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-

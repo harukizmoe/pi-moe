@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"harukizmoe/pimoe/internal/agent"
-	"harukizmoe/pimoe/internal/harness"
+	"harukizmoe/pimoe/internal/logger"
+	"harukizmoe/pimoe/internal/session"
 )
 
 func TestReadInputJoinsArgsIntoPrompt(t *testing.T) {
@@ -99,10 +105,61 @@ func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
 	}
 }
 
+func TestParseCLIOptionsAcceptsInteractiveFlagWithoutSwallowingPromptArgs(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--interactive", "use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if !got.interactive {
+		t.Fatal("interactive = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+	if got.includeTrace {
+		t.Fatal("includeTrace = true, want false")
+	}
+}
+
+func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	runner, err := session.New(context.Background(), session.Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("session.New() error = %v", err)
+	}
+
+	input := strings.NewReader("first prompt\nsecond prompt\nquit\n")
+	var output bytes.Buffer
+
+	if err := runInteractive(context.Background(), runner, input, &output, false); err != nil {
+		t.Fatalf("runInteractive() error = %v", err)
+	}
+
+	if got := strings.Count(output.String(), "13 * 7 = 91\n"); got != 2 {
+		t.Fatalf("final answer occurrences = %d, want 2 in %q", got, output.String())
+	}
+
+	if got := collectUserPrompts(runner.Messages()); !reflect.DeepEqual(got, []string{"first prompt", "second prompt"}) {
+		t.Fatalf("session user prompts = %#v, want first and second prompt", got)
+	}
+}
+
 func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
 	output, err := collectRunOutput(eventStream(
-		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "done without tools"}},
-		harness.RunEndEvent{RunID: "run-1"},
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "done without tools"}},
+		session.RunEndEvent{RunID: "run-1"},
 	))
 	if err != nil {
 		t.Fatalf("collectRunOutput() error = %v", err)
@@ -121,12 +178,12 @@ func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T
 
 func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 	output, err := collectRunOutput(eventStream(
-		harness.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
-		harness.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
-		harness.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
-		harness.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
-		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
-		harness.RunEndEvent{RunID: "run-1"},
+		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
+		session.RunEndEvent{RunID: "run-1"},
 	))
 	if err != nil {
 		t.Fatalf("collectRunOutput() error = %v", err)
@@ -153,10 +210,10 @@ func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	toolErr := errors.New("upstream unavailable")
 	output, err := collectRunOutput(eventStream(
-		harness.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
-		harness.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
-		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
-		harness.RunEndEvent{RunID: "run-1"},
+		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
+		session.RunEndEvent{RunID: "run-1"},
 	))
 	if err != nil {
 		t.Fatalf("collectRunOutput() error = %v", err)
@@ -181,11 +238,32 @@ func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	}
 }
 
-func eventStream(events ...harness.Event) <-chan harness.Event {
-	stream := make(chan harness.Event, len(events))
+func eventStream(events ...session.Event) <-chan session.Event {
+	stream := make(chan session.Event, len(events))
 	for _, event := range events {
 		stream <- event
 	}
 	close(stream)
 	return stream
+}
+
+func writeCLIProvidersConfig(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "providers.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write providers config: %v", err)
+	}
+	return path
+}
+
+func collectUserPrompts(messages []agent.Message) []string {
+	userPrompts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		userMessage, ok := message.(agent.UserMessage)
+		if ok {
+			userPrompts = append(userPrompts, userMessage.Content)
+		}
+	}
+	return userPrompts
 }

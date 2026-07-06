@@ -65,11 +65,11 @@
 
 - `internal/llms` 对应 OMP/Tau 的 AI/provider 层：统一 LLM 类型、Provider 接口、Provider 注册、OpenAI-compatible 协议适配。
 - 不新增 `internal/ai`；LLM 协议相关代码都放在 `internal/llms`。
-- `internal/agent` 只负责 Agent 主循环和 tool calling 流程，不处理配置读取、HTTP 路由或具体 Provider HTTP 细节。
+- `internal/agent` 负责已装配 Agent 执行器：Provider/tool 注册、LLM 调用、tool-calling 主循环和事件输出；不处理 HTTP 路由或持久化。
+- `internal/session` 是应用层唯一会话门面：创建并持有 Agent，负责当前 prompt/run API，后续 session 持久化、resume、branch 都从这里扩展。
 - `internal/tools` 只负责工具接口、工具注册、schema 暴露和工具执行。
 - `internal/config` 负责 Viper 读取 YAML 和环境变量；其他业务包不直接依赖 Viper。
 - `internal/logger` 负责统一日志接口和开发期输出；业务包通过接口注入，不直接操作 `slog`。
-- `internal/harness` 负责组装 config、Provider、tools 和 Agent；CLI/API 只能调用 harness，不重复装配依赖。
 - `internal/application` 保留给后续 HTTP/business 入口；CLI 闭环跑通前不要扩展 router、middleware、data。
 
 ## 配置约定

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -9,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"harukizmoe/pimoe/internal/harness"
 	"harukizmoe/pimoe/internal/logger"
+	"harukizmoe/pimoe/internal/session"
 )
 
 const (
@@ -34,12 +35,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	input, err := readInput(opts.promptArgs, os.Stdin)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	runner, err := harness.New(context.Background(), harness.Config{
+	runner, err := session.New(context.Background(), session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		Logger:             appLogger,
@@ -48,8 +44,19 @@ func main() {
 		log.Fatal(err)
 	}
 
-	session := runner.NewSession()
-	output, err := collectRunOutput(session.Prompt(context.Background(), input))
+	if opts.interactive {
+		if err := runInteractive(context.Background(), runner, os.Stdin, os.Stdout, opts.includeTrace); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	input, err := readInput(opts.promptArgs, os.Stdin)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	output, err := collectRunOutput(runner.Prompt(context.Background(), input))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -62,6 +69,7 @@ type cliOptions struct {
 	providerName string
 	includeTrace bool
 	promptArgs   []string
+	interactive  bool
 }
 
 func parseCLIOptions(args []string) (cliOptions, error) {
@@ -71,6 +79,7 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
 	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
+	flags.BoolVar(&opts.interactive, "interactive", false, "read prompts line by line until quit or EOF")
 
 	if err := flags.Parse(args); err != nil {
 		return cliOptions{}, fmt.Errorf("parse flags: %w", err)
@@ -94,6 +103,38 @@ func readInput(args []string, stdin io.Reader) (string, error) {
 	return input, nil
 }
 
+func runInteractive(ctx context.Context, runner *session.Session, input io.Reader, output io.Writer, includeTrace bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		prompt := strings.TrimSpace(scanner.Text())
+		if prompt == "" {
+			continue
+		}
+		if strings.EqualFold(prompt, "quit") || strings.EqualFold(prompt, "exit") {
+			return nil
+		}
+
+		runOutput, err := collectRunOutput(runner.Prompt(ctx, prompt))
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(output, formatRunOutput(runOutput, includeTrace)); err != nil {
+			return fmt.Errorf("write output: %w", err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read interactive input: %w", err)
+	}
+	return nil
+}
+
 type runOutput struct {
 	Answer string
 	Steps  []toolStep
@@ -107,20 +148,20 @@ type toolStep struct {
 	Error      string
 }
 
-func collectRunOutput(events <-chan harness.Event) (runOutput, error) {
+func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 	var output runOutput
 	stepByCallID := make(map[string]int)
 
 	for event := range events {
 		switch event := event.(type) {
-		case harness.ToolExecutionStartEvent:
+		case session.ToolExecutionStartEvent:
 			stepByCallID[event.ToolCallID] = len(output.Steps)
 			output.Steps = append(output.Steps, toolStep{
 				ToolCallID: event.ToolCallID,
 				ToolName:   event.ToolName,
 				Arguments:  event.Arguments,
 			})
-		case harness.ToolExecutionEndEvent:
+		case session.ToolExecutionEndEvent:
 			stepIndex, ok := stepByCallID[event.ToolCallID]
 			if !ok {
 				stepIndex = len(output.Steps)
@@ -134,11 +175,11 @@ func collectRunOutput(events <-chan harness.Event) (runOutput, error) {
 			} else {
 				output.Steps[stepIndex].Result = event.Result.Content
 			}
-		case harness.MessageEndEvent:
+		case session.MessageEndEvent:
 			if len(event.Message.ToolCalls) == 0 {
 				output.Answer = event.Message.Content
 			}
-		case harness.ErrorEvent:
+		case session.ErrorEvent:
 			if event.Error != nil {
 				return output, event.Error
 			}

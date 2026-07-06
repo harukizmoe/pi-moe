@@ -1,8 +1,8 @@
-package harness
+package session
 
 import "harukizmoe/pimoe/internal/agent"
 
-// Event 描述 Harness 对外转发的 Agent 运行事件。
+// Event 描述 Session 对外转发的 Agent 运行事件。
 type Event = agent.Event
 
 // RunStartEvent 表示 Agent 已开始一次运行。

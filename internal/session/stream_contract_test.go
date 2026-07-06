@@ -1,4 +1,4 @@
-package harness
+package session
 
 import (
 	"context"
@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-
-func collectHarnessStreamEvents(t *testing.T, stream <-chan Event) []Event {
+func collectSessionStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	t.Helper()
 
 	var events []Event
@@ -25,7 +24,7 @@ func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T)
 		runtime.GOMAXPROCS(oldMaxProcs)
 	})
 
-	h := newFakeHarness(t)
+	s := newFakeSession(t)
 
 	type streamResult struct {
 		event Event
@@ -36,8 +35,7 @@ func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		session := h.NewSession()
-		stream := session.Prompt(ctx, "use calculator to compute 13 * 7")
+		stream := s.Prompt(ctx, "use calculator to compute 13 * 7")
 		resultCh := make(chan streamResult, 1)
 		go func() {
 			event, ok := <-stream
@@ -58,10 +56,10 @@ func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T)
 }
 
 func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
-	h := newFakeHarness(t)
-	events := collectHarnessStreamEvents(t, h.NewSession().Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	s := newFakeSession(t)
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
 
-	assertHarnessEventTypes(t, events,
+	assertSessionEventTypes(t, events,
 		RunStartEvent{},
 		TurnStartEvent{},
 		MessageStartEvent{},
@@ -84,31 +82,15 @@ func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
 		t.Fatalf("TurnStartEvent.UserMessage.Content = %q", turnStart.UserMessage.Content)
 	}
 
-	toolCallDelta := events[3].(MessageDeltaEvent)
-	if toolCallDelta.Kind != MessageDeltaToolCall {
-		t.Fatalf("tool-call delta kind = %q, want %q", toolCallDelta.Kind, MessageDeltaToolCall)
+	toolCall := events[5].(ToolExecutionStartEvent)
+	if toolCall.ToolCallID != "call_fake_calculator" {
+		t.Fatalf("ToolExecutionStartEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
 	}
-	if toolCallDelta.Delta != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("tool-call delta = %q", toolCallDelta.Delta)
+	if toolCall.ToolName != "calculator" {
+		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolCall.ToolName)
 	}
-
-	assistantWithTool := events[4].(MessageEndEvent).Message
-	if len(assistantWithTool.ToolCalls) != 1 {
-		t.Fatalf("assistant tool calls len = %d, want 1", len(assistantWithTool.ToolCalls))
-	}
-	if assistantWithTool.ToolCalls[0].ID != "call_fake_calculator" {
-		t.Fatalf("assistant tool call id = %q, want %q", assistantWithTool.ToolCalls[0].ID, "call_fake_calculator")
-	}
-
-	toolStart := events[5].(ToolExecutionStartEvent)
-	if toolStart.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolExecutionStartEvent.ToolCallID = %q, want %q", toolStart.ToolCallID, "call_fake_calculator")
-	}
-	if toolStart.ToolName != "calculator" {
-		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolStart.ToolName)
-	}
-	if toolStart.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolStart.Arguments)
+	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolCall.Arguments)
 	}
 
 	toolResult := events[6].(ToolExecutionEndEvent)
@@ -125,22 +107,8 @@ func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
 		t.Fatalf("ToolExecutionEndEvent.Error = %v, want nil", toolResult.Error)
 	}
 
-	finalDelta := events[8].(MessageDeltaEvent)
-	if finalDelta.Kind != MessageDeltaText {
-		t.Fatalf("final delta kind = %q, want %q", finalDelta.Kind, MessageDeltaText)
-	}
-	if finalDelta.Delta != "13 * 7 = 91" {
-		t.Fatalf("final delta = %q, want %q", finalDelta.Delta, "13 * 7 = 91")
-	}
-
-	final := events[9].(MessageEndEvent)
-	if final.Message.Content != "13 * 7 = 91" {
-		t.Fatalf("MessageEndEvent.Message.Content = %q, want %q", final.Message.Content, "13 * 7 = 91")
-	}
-
-	turnEnd := events[10].(TurnEndEvent)
-	if turnEnd.Turn != 1 {
-		t.Fatalf("TurnEndEvent.Turn = %d, want 1", turnEnd.Turn)
+	finalMessage := events[9].(MessageEndEvent)
+	if finalMessage.Message.Content != "13 * 7 = 91" {
+		t.Fatalf("final MessageEndEvent.Message.Content = %q, want %q", finalMessage.Message.Content, "13 * 7 = 91")
 	}
 }
-

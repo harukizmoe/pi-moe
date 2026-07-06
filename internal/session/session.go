@@ -1,4 +1,4 @@
-package harness
+package session
 
 import (
 	"context"
@@ -10,6 +10,9 @@ import (
 	"harukizmoe/pimoe/internal/llms"
 )
 
+// Config 保存创建 Session 所需的 Agent 装配配置。
+type Config = agent.Config
+
 // Session 保存一次多 turn Agent 对话的内存态 transcript 和运行控制。
 type Session struct {
 	mu        sync.Mutex
@@ -19,12 +22,16 @@ type Session struct {
 	listeners map[chan Event]struct{}
 }
 
-// NewSession 创建一个持有独立 transcript 的 Agent 会话。
-func (h *Harness) NewSession() *Session {
-	return &Session{
-		agent:     h.agent,
-		listeners: make(map[chan Event]struct{}),
+// New 创建一个持有独立 transcript 的 Agent 会话。
+func New(ctx context.Context, cfg Config) (*Session, error) {
+	runner, err := agent.NewConfigured(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
+	return &Session{
+		agent:     runner,
+		listeners: make(map[chan Event]struct{}),
+	}, nil
 }
 
 // Prompt 追加用户输入并启动一轮 Agent 运行；返回的 channel 只包含本轮事件。
@@ -94,7 +101,7 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 	for event := range s.agent.Stream(ctx, snapshot) {
 		s.applyTerminalEvent(event)
 		s.publish(event)
-		if !emitHarnessEvent(ctx, out, event) {
+		if !emitSessionEvent(ctx, out, event) {
 			return
 		}
 	}
@@ -122,6 +129,21 @@ func (s *Session) publish(event Event) {
 			close(listener)
 			delete(s.listeners, listener)
 		}
+	}
+}
+
+func emitSessionEvent(ctx context.Context, stream chan<- Event, event Event) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case stream <- event:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

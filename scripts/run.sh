@@ -35,4 +35,4 @@ if [[ -n "${PIMOE_PROMPT:-}" ]]; then
   exec go run ./cmd/cli "$PIMOE_PROMPT"
 fi
 
-exec go run ./cmd/cli "use calculator to compute 13 * 7"
+exec go run ./cmd/cli --interactive
