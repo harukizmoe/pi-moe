@@ -83,6 +83,9 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 			t.Fatalf("events[%d].Type = %q, want %q", i, events[i].Type, wantType)
 		}
 	}
+	if !reflect.DeepEqual(got.Events, events) {
+		t.Fatalf("Run().Events = %#v, want live events %#v", got.Events, events)
+	}
 }
 
 func TestNewUsesProviderNameOverride(t *testing.T) {

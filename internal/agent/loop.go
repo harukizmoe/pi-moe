@@ -47,16 +47,20 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 	}
 
 	result := &RunResult{}
+	emit := func(event Event) {
+		result.Events = append(result.Events, event)
+		a.emit(event)
+	}
 	toolSchemas := a.tools.Schemas()
 
 	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", strings.TrimSpace(lastMessage.Content))
-	a.emit(Event{Type: EventRunStart, Message: strings.TrimSpace(lastMessage.Content)})
+	emit(Event{Type: EventRunStart, Message: strings.TrimSpace(lastMessage.Content)})
 	for chatRound := 0; ; chatRound++ {
 		llmMessages, err := toLLMMessages(messages)
 		if err != nil {
 			return result, err
 		}
-		a.emit(Event{Type: EventLLMRequest, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1})
+		emit(Event{Type: EventLLMRequest, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1})
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
 			Model:    a.model,
@@ -65,9 +69,9 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 		})
 		if err != nil {
 			a.logLLMError(ctx, chatRound, err)
-			a.emit(Event{Type: EventLLMError, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1, Error: err})
+			emit(Event{Type: EventLLMError, Message: chatRoundEventMessage(chatRound), ChatRound: chatRound + 1, Error: err})
 			runErr := fmt.Errorf("llm chat round %d: %w", chatRound+1, err)
-			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
 			return result, runErr
 		}
 
@@ -77,21 +81,21 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 		}
 		if _, err := toLLMMessage(assistantMessage); err != nil {
 			runErr := fmt.Errorf("assistant response: %w", err)
-			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
 			return result, runErr
 		}
 		if len(assistantMessage.ToolCalls) == 0 {
 			result.Answer = assistantMessage.Content
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
-			a.emit(Event{Type: EventFinal, Message: assistantMessage.Content})
-			a.emit(Event{Type: EventRunEnd, Message: assistantMessage.Content})
+			emit(Event{Type: EventFinal, Message: assistantMessage.Content})
+			emit(Event{Type: EventRunEnd, Message: assistantMessage.Content})
 			return result, nil
 		}
 
 		if result.ToolRounds >= a.maxSteps {
 			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
 			runErr := fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)
-			a.emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
+			emit(Event{Type: EventAgentError, Message: runErr.Error(), Error: runErr})
 			return result, runErr
 		}
 
@@ -99,7 +103,7 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 		messages = append(messages, assistantMessage)
 		for _, call := range assistantMessage.ToolCalls {
 			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "arguments", call.Function.Arguments)
-			a.emit(Event{Type: EventToolCall, Message: call.Function.Name, ToolName: call.Function.Name, ToolCallID: call.ID})
+			emit(Event{Type: EventToolCall, Message: call.Function.Name, ToolName: call.Function.Name, ToolCallID: call.ID})
 
 			step := Step{ToolCallID: call.ID, ToolName: call.Function.Name, Arguments: call.Function.Arguments}
 			toolMessage, err := a.runToolCall(ctx, call)
@@ -112,7 +116,7 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunR
 				result.Steps = append(result.Steps, step)
 				a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			}
-			a.emit(Event{Type: EventToolResult, Message: toolMessage.Content, ToolName: call.Function.Name, ToolCallID: call.ID, IsError: err != nil, Error: err})
+			emit(Event{Type: EventToolResult, Message: toolMessage.Content, ToolName: call.Function.Name, ToolCallID: call.ID, IsError: err != nil, Error: err})
 			messages = append(messages, toolMessage)
 		}
 		result.ToolRounds++
