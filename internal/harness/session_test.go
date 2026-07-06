@@ -140,6 +140,79 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 	}
 }
 
+func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+	provider := &maxStepLoopProvider{t: t}
+	h := &Harness{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1})}
+	session := h.NewSession()
+
+	events := collectHarnessStreamEvents(t, session.Prompt(context.Background(), "compute (2 + 3) * 4"))
+	errEvent, ok := events[len(events)-1].(ErrorEvent)
+	if !ok {
+		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+	}
+	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "max steps") {
+		t.Fatalf("ErrorEvent.Error = %v, want max steps", errEvent.Error)
+	}
+
+	messages := session.Messages()
+	if len(messages) != 3 {
+		t.Fatalf("Messages() len = %d, want 3 without dangling over-limit assistant: %#v", len(messages), messages)
+	}
+	assistantWithTool := messages[1].(agent.AssistantMessage)
+	if len(assistantWithTool.ToolCalls) != 1 {
+		t.Fatalf("first assistant tool calls len = %d, want 1", len(assistantWithTool.ToolCalls))
+	}
+	if _, ok := messages[2].(agent.ToolResultMessage); !ok {
+		t.Fatalf("Messages()[2] = %T, want ToolResultMessage", messages[2])
+	}
+}
+
+type maxStepLoopProvider struct {
+	t     *testing.T
+	round int
+}
+
+func (p *maxStepLoopProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	p.t.Helper()
+	p.round++
+	switch p.round {
+	case 1:
+		return &llms.ChatResponse{Message: llms.Message{
+			Role: llms.RoleAssistant,
+			ToolCalls: []llms.ToolCall{
+				maxStepCalculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
+			},
+		}}, nil
+	case 2:
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != llms.RoleTool || last.Content != "5" {
+			p.t.Fatalf("second request last message = %#v, want tool result 5", last)
+		}
+		return &llms.ChatResponse{Message: llms.Message{
+			Role: llms.RoleAssistant,
+			ToolCalls: []llms.ToolCall{
+				maxStepCalculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
+			},
+		}}, nil
+	default:
+		p.t.Fatalf("unexpected chat round = %d", p.round)
+		return nil, nil
+	}
+}
+
+func maxStepCalculatorToolCall(id string, arguments string) llms.ToolCall {
+	return llms.ToolCall{
+		ID:   id,
+		Type: "function",
+		Function: llms.ToolCallFunction{
+			Name:      "calculator",
+			Arguments: arguments,
+		},
+	}
+}
+
 type blockingProvider struct {
 	started chan struct{}
 	release chan struct{}

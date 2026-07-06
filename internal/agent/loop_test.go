@@ -391,7 +391,6 @@ func collectStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-
 func TestAgentStreamReturnsAnswerWithoutToolCalls(t *testing.T) {
 	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
 		return &llms.ChatResponse{Message: llms.Message{
@@ -864,9 +863,6 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 		MessageEndEvent{},
 		ToolExecutionStartEvent{},
 		ToolExecutionEndEvent{},
-		MessageStartEvent{},
-		MessageDeltaEvent{},
-		MessageEndEvent{},
 		ErrorEvent{},
 	)
 	if len(provider.requests) != 2 {
@@ -881,7 +877,7 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
 	}
 
-	errEvent := events[10].(ErrorEvent)
+	errEvent := events[7].(ErrorEvent)
 	if !strings.Contains(errEvent.Error.Error(), "max steps") {
 		t.Fatalf("stream error = %v, want max steps message", errEvent.Error)
 	}

@@ -92,6 +92,12 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			return
 		}
 
+		if len(assistantMessage.ToolCalls) > 0 && chatRound >= a.maxSteps {
+			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
+			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
+			return
+		}
+
 		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
 		if !emitAssistantLifecycle(emit, runID, messageID, assistantMessage) {
 			return
@@ -104,12 +110,6 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 				return
 			}
 			emit(RunEndEvent{RunID: runID})
-			return
-		}
-
-		if chatRound >= a.maxSteps {
-			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
-			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
 			return
 		}
 
