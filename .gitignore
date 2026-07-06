@@ -199,3 +199,4 @@ configs/providers.yaml
 .env
 .env.local
 docs
+.worktrees/
