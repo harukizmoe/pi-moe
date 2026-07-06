@@ -824,6 +824,10 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 	session := h.NewSession()
 
 	first := session.Prompt(context.Background(), "first prompt")
+	firstDone := make(chan []Event, 1)
+	go func() {
+		firstDone <- collectHarnessStreamEvents(t, first)
+	}()
 	<-provider.started
 
 	secondEvents := collectHarnessStreamEvents(t, session.Prompt(context.Background(), "second prompt"))
@@ -847,7 +851,7 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 	}
 
 	close(provider.release)
-	collectHarnessStreamEvents(t, first)
+	<-firstDone
 
 	messagesAfterFirstPrompt := session.Messages()
 	if len(messagesAfterFirstPrompt) != 2 {
