@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/tools"
@@ -394,321 +396,95 @@ func TestAgentRunReturnsMaxStepsErrorWhenToolLoopExceedsLimit(t *testing.T) {
 	}
 }
 
-func assertEventTypes(t *testing.T, events []Event, want []EventType) {
+type agentStreamer interface {
+	Stream(context.Context, string) <-chan Event
+}
+
+var _ agentStreamer = (*Agent)(nil)
+
+func collectStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	t.Helper()
 
-	if len(events) != len(want) {
-		t.Fatalf("events len = %d, want %d", len(events), len(want))
-	}
-	for i, wantType := range want {
-		if events[i].Type != wantType {
-			t.Fatalf("event[%d].Type = %q, want %q", i, events[i].Type, wantType)
-		}
-	}
-}
-
-func assertEventsMatch(t *testing.T, got []Event, want []Event) {
-	t.Helper()
-
-	if len(got) != len(want) {
-		t.Fatalf("events len = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].Type != want[i].Type || got[i].Message != want[i].Message || got[i].ChatRound != want[i].ChatRound || got[i].ToolName != want[i].ToolName || got[i].ToolCallID != want[i].ToolCallID || got[i].IsError != want[i].IsError {
-			t.Fatalf("event[%d] = %#v, want %#v", i, got[i], want[i])
-		}
-		if (got[i].Error == nil) != (want[i].Error == nil) {
-			t.Fatalf("event[%d].Error = %v, want %v", i, got[i].Error, want[i].Error)
-		}
-		if got[i].Error != nil && got[i].Error.Error() != want[i].Error.Error() {
-			t.Fatalf("event[%d].Error = %v, want %v", i, got[i].Error, want[i].Error)
-		}
-	}
-}
-
-func TestAgentRunEmitsRunLifecycleEventsWithoutTools(t *testing.T) {
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "done without tools",
-		}}, nil
-	})}
-
 	var events []Event
-	a := NewWithOptions(provider, tools.NewRegistry(), "fake-tool-model", Options{
-		OnEvent: func(event Event) {
-			events = append(events, event)
-		},
-	})
-
-	got, err := a.Run(context.Background(), "just answer directly")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got != "done without tools" {
-		t.Fatalf("Run() answer = %q", got)
+	for event := range stream {
+		events = append(events, event)
 	}
 
-	assertEventTypes(t, events, []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventFinal,
-		EventRunEnd,
-	})
-	if events[0].Message != "just answer directly" {
-		t.Fatalf("run_start.Message = %q, want %q", events[0].Message, "just answer directly")
-	}
-	if events[0].ToolName != "" || events[0].ToolCallID != "" || events[0].Error != nil {
-		t.Fatalf("run_start metadata = %#v, want empty tool metadata and nil error", events[0])
-	}
-	if events[1].Message != "chat round 1" {
-		t.Fatalf("first llm_request.Message = %q, want %q", events[1].Message, "chat round 1")
-	}
-	if events[1].ChatRound != 1 || events[1].ToolName != "" || events[1].ToolCallID != "" || events[1].Error != nil {
-		t.Fatalf("first llm_request metadata = %#v, want chat round 1 with empty tool metadata and nil error", events[1])
-	}
-	if events[2].Message != got {
-		t.Fatalf("final.Message = %q, want %q", events[2].Message, got)
-	}
-	if events[3].Message != got {
-		t.Fatalf("run_end.Message = %q, want %q", events[3].Message, got)
-	}
+	return events
 }
 
-func TestAgentRunResultReturnsToolCallEventsAndMatchesLiveStream(t *testing.T) {
+func TestAgentStreamReturnsTypedToolCallingEvents(t *testing.T) {
+	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
+	if err != nil {
+		t.Fatalf("NewFakeProvider() error = %v", err)
+	}
+
+	recorder := &recordingProvider{inner: provider}
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
-	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		round++
-		switch round {
-		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_mul", `{"a":13,"b":7,"op":"mul"}`),
-				},
-			}}, nil
-		case 2:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "13 * 7 = 91",
-			}}, nil
-		default:
-			t.Fatalf("unexpected chat round = %d", round)
-			return nil, nil
-		}
-	})}
+	a := New(recorder, registry, "fake-tool-model")
+	events := collectStreamEvents(t, a.Stream(context.Background(), "use calculator to compute 13 * 7"))
 
-	var events []Event
-	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
-		MaxSteps: 1,
-		OnEvent: func(event Event) {
-			events = append(events, event)
-		},
-	})
-
-	got, err := a.RunResult(context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("RunResult() error = %v", err)
+	if len(events) != 7 {
+		t.Fatalf("stream events len = %d, want 7", len(events))
 	}
-	if got == nil {
-		t.Fatal("RunResult() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("RunResult().Answer = %q", got.Answer)
+	if len(recorder.requests) != 2 {
+		t.Fatalf("provider requests len = %d, want 2", len(recorder.requests))
 	}
 
-	wantEventTypes := []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventToolCall,
-		EventToolResult,
-		EventLLMRequest,
-		EventFinal,
-		EventRunEnd,
+	if _, ok := events[0].(RunStartEvent); !ok {
+		t.Fatalf("event[0] = %T, want RunStartEvent", events[0])
 	}
-	assertEventTypes(t, events, wantEventTypes)
-	assertEventTypes(t, got.Events, wantEventTypes)
-	assertEventsMatch(t, got.Events, events)
-}
-
-func TestAgentRunResultReturnsProviderFailureEventsWithoutRunEnd(t *testing.T) {
-	providerErr := errors.New("provider unavailable")
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return nil, providerErr
-	})}
-
-	var events []Event
-	a := NewWithOptions(provider, tools.NewRegistry(), "fake-tool-model", Options{
-		OnEvent: func(event Event) {
-			events = append(events, event)
-		},
-	})
-
-	got, err := a.RunResult(context.Background(), "answer fails upstream")
-	if err == nil {
-		t.Fatal("RunResult() error = nil, want provider failure")
-	}
-	if got == nil {
-		t.Fatal("RunResult() result = nil, want partial result")
-	}
-	if got.Answer != "" {
-		t.Fatalf("RunResult().Answer = %q, want empty string on provider failure", got.Answer)
+	if _, ok := events[1].(LLMRequestEvent); !ok {
+		t.Fatalf("event[1] = %T, want LLMRequestEvent", events[1])
 	}
 
-	wantEventTypes := []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventLLMError,
-		EventAgentError,
+	toolCall, ok := events[2].(ToolCallEvent)
+	if !ok {
+		t.Fatalf("event[2] = %T, want ToolCallEvent", events[2])
 	}
-	assertEventTypes(t, events, wantEventTypes)
-	assertEventTypes(t, got.Events, wantEventTypes)
-	assertEventsMatch(t, got.Events, events)
-}
-
-func TestAgentRunEmitsAgentErrorEventWhenMaxStepsExceeded(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(tools.Calculator{})
-
-	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		round++
-		switch round {
-		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
-				},
-			}}, nil
-		case 2:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
-				},
-			}}, nil
-		default:
-			t.Fatalf("unexpected chat round = %d", round)
-			return nil, nil
-		}
-	})}
-
-	var events []Event
-	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
-		MaxSteps: 1,
-		OnEvent: func(event Event) {
-			events = append(events, event)
-		},
-	})
-
-	got, err := a.Run(context.Background(), "compute (2 + 3) * 4")
-	if err == nil {
-		t.Fatal("Run() error = nil, want max-steps failure")
+	if toolCall.ToolCallID != "call_fake_calculator" {
+		t.Fatalf("ToolCallEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
 	}
-	if got != "" {
-		t.Fatalf("Run() answer = %q, want empty string on max-steps failure", got)
+	if toolCall.ToolName != "calculator" {
+		t.Fatalf("ToolCallEvent.ToolName = %q, want calculator", toolCall.ToolName)
+	}
+	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("ToolCallEvent.Arguments = %q", toolCall.Arguments)
 	}
 
-	assertEventTypes(t, events, []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventToolCall,
-		EventToolResult,
-		EventLLMRequest,
-		EventAgentError,
-	})
-	if events[2].ToolName != "calculator" || events[2].ToolCallID != "call_step_1" {
-		t.Fatalf("tool_call event = %#v, want first tool metadata", events[2])
+	toolResult, ok := events[3].(ToolResultEvent)
+	if !ok {
+		t.Fatalf("event[3] = %T, want ToolResultEvent", events[3])
 	}
-	if events[3].Message != "5" || events[3].ToolName != "calculator" || events[3].ToolCallID != "call_step_1" || events[3].Error != nil {
-		t.Fatalf("tool_result event = %#v, want first successful tool result", events[3])
+	if toolResult.ToolCallID != "call_fake_calculator" {
+		t.Fatalf("ToolResultEvent.ToolCallID = %q, want %q", toolResult.ToolCallID, "call_fake_calculator")
 	}
-	if events[4].Message != "chat round 2" {
-		t.Fatalf("second llm_request.Message = %q, want %q", events[4].Message, "chat round 2")
+	if toolResult.ToolName != "calculator" {
+		t.Fatalf("ToolResultEvent.ToolName = %q, want calculator", toolResult.ToolName)
 	}
-	if events[5].Message != err.Error() || events[5].Error == nil || !strings.Contains(events[5].Error.Error(), "max steps") {
-		t.Fatalf("agent_error event = %#v, want max-steps summary %q", events[5], err.Error())
+	if toolResult.Result != "91" {
+		t.Fatalf("ToolResultEvent.Result = %q, want 91", toolResult.Result)
 	}
-}
-
-func TestAgentRunEmitsToolErrorResultAndStillEndsWithFinalAnswer(t *testing.T) {
-	registry := tools.NewRegistry()
-	registry.Register(tools.Calculator{})
-
-	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		round++
-		switch round {
-		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_bad_args", `{"a":1`),
-				},
-			}}, nil
-		case 2:
-			got := req.Messages[len(req.Messages)-1]
-			if got.Role != llms.RoleTool || got.ToolCallID != "call_bad_args" {
-				t.Fatalf("second request last message = %#v, want tool failure for call_bad_args", got)
-			}
-			if !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
-				t.Fatalf("second request tool content = %q, want sanitized calculator failure", got.Content)
-			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "I couldn't use calculator because the arguments were malformed.",
-			}}, nil
-		default:
-			t.Fatalf("unexpected chat round = %d", round)
-			return nil, nil
-		}
-	})}
-
-	var events []Event
-	a := NewWithOptions(provider, registry, "fake-tool-model", Options{
-		OnEvent: func(event Event) {
-			events = append(events, event)
-		},
-	})
-
-	got, err := a.Run(context.Background(), "try calculator with bad arguments")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got != "I couldn't use calculator because the arguments were malformed." {
-		t.Fatalf("Run() answer = %q", got)
+	if toolResult.Error != nil {
+		t.Fatalf("ToolResultEvent.Error = %v, want nil", toolResult.Error)
 	}
 
-	assertEventTypes(t, events, []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventToolCall,
-		EventToolResult,
-		EventLLMRequest,
-		EventFinal,
-		EventRunEnd,
-	})
-	if events[2].Message != "calculator" || events[2].ToolName != "calculator" || events[2].ToolCallID != "call_bad_args" || events[2].Error != nil {
-		t.Fatalf("tool_call event = %#v, want failing calculator metadata", events[2])
+	if _, ok := events[4].(LLMRequestEvent); !ok {
+		t.Fatalf("event[4] = %T, want second LLMRequestEvent", events[4])
 	}
-	if !strings.HasPrefix(events[3].Message, `tool "calculator" failed: `) {
-		t.Fatalf("tool_result.Message = %q, want sanitized tool failure", events[3].Message)
+
+	final, ok := events[5].(FinalEvent)
+	if !ok {
+		t.Fatalf("event[5] = %T, want FinalEvent", events[5])
 	}
-	if events[3].ToolName != "calculator" || events[3].ToolCallID != "call_bad_args" || !events[3].IsError || events[3].Error == nil || !strings.Contains(events[3].Error.Error(), "decode calculator arguments") {
-		t.Fatalf("tool_result event = %#v, want tool failure metadata with IsError true", events[3])
+	if final.Answer != "13 * 7 = 91" {
+		t.Fatalf("FinalEvent.Answer = %q, want %q", final.Answer, "13 * 7 = 91")
 	}
-	if events[4].Message != "chat round 2" {
-		t.Fatalf("second llm_request.Message = %q, want %q", events[4].Message, "chat round 2")
-	}
-	if events[5].Message != got {
-		t.Fatalf("final.Message = %q, want %q", events[5].Message, got)
-	}
-	if events[6].Message != got {
-		t.Fatalf("run_end.Message = %q, want %q", events[6].Message, got)
+
+	if _, ok := events[6].(RunEndEvent); !ok {
+		t.Fatalf("event[6] = %T, want RunEndEvent", events[6])
 	}
 }
 
@@ -739,6 +515,80 @@ func TestAgentRunResultReturnsAnswerWithoutToolCalls(t *testing.T) {
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("chat requests len = %d, want 1", len(provider.requests))
+	}
+}
+
+func TestAgentRunResultWrapsProviderErrorWithChatRoundContext(t *testing.T) {
+	sentinel := errors.New("provider chat failed")
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		return nil, sentinel
+	})}
+
+	a := New(provider, tools.NewRegistry(), "fake-tool-model")
+	got, err := a.RunResult(context.Background(), "just answer directly")
+	if err == nil {
+		t.Fatalf("RunResult() error = nil, result = %#v", got)
+	}
+	if !strings.Contains(err.Error(), "llm chat round 1") {
+		t.Fatalf("RunResult() error = %q, want chat round context", err.Error())
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunResult() error = %v, want to wrap sentinel %v", err, sentinel)
+	}
+}
+
+func TestAgentRunResultReturnsContextCancellationWhenStreamClosesWithoutTerminalError(t *testing.T) {
+	oldMaxProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(oldMaxProcs)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		cancel()
+		return &llms.ChatResponse{Message: llms.Message{
+			Role:    llms.RoleAssistant,
+			Content: "answer dropped by cancellation",
+		}}, nil
+	})}
+
+	a := New(provider, tools.NewRegistry(), "fake-tool-model")
+	got, err := a.RunResult(ctx, "just answer directly")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunResult() error = %v, want context cancellation", err)
+	}
+	if got == nil {
+		t.Fatal("RunResult() result = nil, want partial result")
+	}
+	if got.Answer != "" {
+		t.Fatalf("RunResult().Answer = %q, want empty when cancellation drops terminal events", got.Answer)
+	}
+}
+
+func TestAgentStreamMessagesClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvalid(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		t.Fatal("provider.Chat() should not be called for invalid history")
+		return nil, nil
+	})}
+
+	a := New(provider, tools.NewRegistry(), "fake-tool-model")
+	stream := a.StreamMessages(ctx, []llms.Message{
+		{Role: llms.RoleAssistant},
+		{Role: llms.RoleUser, Content: "continue"},
+	})
+
+	select {
+	case event, ok := <-stream:
+		if ok {
+			t.Fatalf("StreamMessages() delivered %T (%#v), want closed stream without event", event, event)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("StreamMessages() did not close promptly")
 	}
 }
 

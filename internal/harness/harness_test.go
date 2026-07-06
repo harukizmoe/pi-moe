@@ -22,14 +22,10 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
       model: fake-tool-model
 `)
 
-	var events []Event
 	h, err := New(context.Background(), Config{
 		ProviderConfigPath: providerConfigPath,
 		Logger:             logger.NewNoop(),
 		MaxSteps:           1,
-		OnEvent: EventHandler(func(event Event) {
-			events = append(events, event)
-		}),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -64,27 +60,6 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 	}
 	if step.Error != "" {
 		t.Fatalf("Run().Steps[0].Error = %q, want empty", step.Error)
-	}
-
-	wantEventTypes := []EventType{
-		EventRunStart,
-		EventLLMRequest,
-		EventToolCall,
-		EventToolResult,
-		EventLLMRequest,
-		EventFinal,
-		EventRunEnd,
-	}
-	if len(events) != len(wantEventTypes) {
-		t.Fatalf("events len = %d, want %d", len(events), len(wantEventTypes))
-	}
-	for i, wantType := range wantEventTypes {
-		if events[i].Type != wantType {
-			t.Fatalf("events[%d].Type = %q, want %q", i, events[i].Type, wantType)
-		}
-	}
-	if !reflect.DeepEqual(got.Events, events) {
-		t.Fatalf("Run().Events = %#v, want live events %#v", got.Events, events)
 	}
 }
 

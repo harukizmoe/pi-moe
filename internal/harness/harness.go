@@ -24,8 +24,6 @@ type Config struct {
 	Logger logger.Logger
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
 	MaxSteps int
-	// OnEvent 接收 Agent 运行事件；为空时不发送事件。
-	OnEvent EventHandler
 }
 
 // Harness 是后端入口可复用的 Agent 运行内核。
@@ -75,10 +73,46 @@ func New(ctx context.Context, cfg Config) (*Harness, error) {
 	runner := agent.NewWithOptions(provider, toolRegistry, providerConfig.Model, agent.Options{
 		Logger:   cfg.Logger,
 		MaxSteps: cfg.MaxSteps,
-		OnEvent:  cfg.OnEvent,
 	})
 
 	return &Harness{agent: runner}, nil
+}
+
+// Stream 执行一次 Agent 运行，并通过 channel 实时返回运行事件。
+func (h *Harness) Stream(ctx context.Context, input string) <-chan Event {
+	stream := make(chan Event)
+	go func() {
+		defer close(stream)
+		if strings.TrimSpace(input) == "" {
+			emitHarnessError(ctx, stream, fmt.Errorf("empty input"))
+			return
+		}
+		for event := range h.agent.Stream(ctx, input) {
+			if !emitHarnessEvent(ctx, stream, event) {
+				return
+			}
+		}
+	}()
+	return stream
+}
+
+func emitHarnessError(ctx context.Context, stream chan<- Event, err error) bool {
+	return emitHarnessEvent(ctx, stream, ErrorEvent{Error: err})
+}
+
+func emitHarnessEvent(ctx context.Context, stream chan<- Event, event Event) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case stream <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // Run 执行一次 Agent 运行，并返回结构化结果。

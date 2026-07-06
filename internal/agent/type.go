@@ -20,8 +20,6 @@ type RunResult struct {
 	ToolRounds int
 	// Steps 记录每次工具执行的输入、输出和错误。
 	Steps []Step
-	// Events 记录本次运行产生的完整事件序列，供应用层渲染或回放。
-	Events []Event
 }
 
 // Step 表示一次本地工具执行的 trace 记录。
