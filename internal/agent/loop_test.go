@@ -76,7 +76,7 @@ func runAgentResult(t *testing.T, a *Agent, ctx context.Context, input string) (
 }
 
 func streamAgentText(a *Agent, ctx context.Context, input string) <-chan Event {
-	return a.StreamAgentMessages(ctx, []Message{UserMessage{Content: input}})
+	return a.Stream(ctx, []Message{UserMessage{Content: input}})
 }
 
 func assertMessagesEqual(t *testing.T, got, want []llms.Message) {
@@ -412,7 +412,7 @@ func collectStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-func TestAgentStreamReturnsTypedToolCallingEvents(t *testing.T) {
+func TestAgentStreamReturnsLifecycleToolCallingEvents(t *testing.T) {
 	provider, err := llms.NewFakeProvider(llms.ProviderConfig{Model: "fake-tool-model"})
 	if err != nil {
 		t.Fatalf("NewFakeProvider() error = %v", err)
@@ -425,65 +425,63 @@ func TestAgentStreamReturnsTypedToolCallingEvents(t *testing.T) {
 	a := New(recorder, registry, "fake-tool-model")
 	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "use calculator to compute 13 * 7"))
 
-	if len(events) != 7 {
-		t.Fatalf("stream events len = %d, want 7", len(events))
-	}
+	assertEventTypes(t, events,
+		RunStartEvent{},
+		TurnStartEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		ToolExecutionStartEvent{},
+		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
+		MessageEndEvent{},
+		TurnEndEvent{},
+		RunEndEvent{},
+	)
 	if len(recorder.requests) != 2 {
 		t.Fatalf("provider requests len = %d, want 2", len(recorder.requests))
 	}
 
-	if _, ok := events[0].(RunStartEvent); !ok {
-		t.Fatalf("event[0] = %T, want RunStartEvent", events[0])
+	toolCallDelta := events[3].(MessageDeltaEvent)
+	if toolCallDelta.Kind != MessageDeltaToolCall {
+		t.Fatalf("event[3].Kind = %q, want %q", toolCallDelta.Kind, MessageDeltaToolCall)
 	}
-	if _, ok := events[1].(LLMRequestEvent); !ok {
-		t.Fatalf("event[1] = %T, want LLMRequestEvent", events[1])
+	if toolCallDelta.Delta != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("event[3].Delta = %q", toolCallDelta.Delta)
 	}
 
-	toolCall, ok := events[2].(ToolCallEvent)
-	if !ok {
-		t.Fatalf("event[2] = %T, want ToolCallEvent", events[2])
-	}
+	toolCall := events[5].(ToolExecutionStartEvent)
 	if toolCall.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolCallEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
+		t.Fatalf("ToolExecutionStartEvent.ToolCallID = %q, want %q", toolCall.ToolCallID, "call_fake_calculator")
 	}
 	if toolCall.ToolName != "calculator" {
-		t.Fatalf("ToolCallEvent.ToolName = %q, want calculator", toolCall.ToolName)
+		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolCall.ToolName)
 	}
 	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolCallEvent.Arguments = %q", toolCall.Arguments)
+		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolCall.Arguments)
 	}
 
-	toolResult, ok := events[3].(ToolResultEvent)
-	if !ok {
-		t.Fatalf("event[3] = %T, want ToolResultEvent", events[3])
+	toolResult := events[6].(ToolExecutionEndEvent)
+	if toolResult.Result.ToolCallID != "call_fake_calculator" {
+		t.Fatalf("ToolExecutionEndEvent.Result.ToolCallID = %q, want %q", toolResult.Result.ToolCallID, "call_fake_calculator")
 	}
-	if toolResult.ToolCallID != "call_fake_calculator" {
-		t.Fatalf("ToolResultEvent.ToolCallID = %q, want %q", toolResult.ToolCallID, "call_fake_calculator")
+	if toolResult.Result.ToolName != "calculator" {
+		t.Fatalf("ToolExecutionEndEvent.Result.ToolName = %q, want calculator", toolResult.Result.ToolName)
 	}
-	if toolResult.ToolName != "calculator" {
-		t.Fatalf("ToolResultEvent.ToolName = %q, want calculator", toolResult.ToolName)
-	}
-	if toolResult.Result != "91" {
-		t.Fatalf("ToolResultEvent.Result = %q, want 91", toolResult.Result)
+	if toolResult.Result.Content != "91" {
+		t.Fatalf("ToolExecutionEndEvent.Result.Content = %q, want 91", toolResult.Result.Content)
 	}
 	if toolResult.Error != nil {
-		t.Fatalf("ToolResultEvent.Error = %v, want nil", toolResult.Error)
+		t.Fatalf("ToolExecutionEndEvent.Error = %v, want nil", toolResult.Error)
 	}
 
-	if _, ok := events[4].(LLMRequestEvent); !ok {
-		t.Fatalf("event[4] = %T, want second LLMRequestEvent", events[4])
+	final := events[9].(MessageEndEvent)
+	if final.Message.Content != "13 * 7 = 91" {
+		t.Fatalf("MessageEndEvent.Message.Content = %q, want %q", final.Message.Content, "13 * 7 = 91")
 	}
-
-	final, ok := events[5].(FinalEvent)
-	if !ok {
-		t.Fatalf("event[5] = %T, want FinalEvent", events[5])
-	}
-	if final.Answer != "13 * 7 = 91" {
-		t.Fatalf("FinalEvent.Answer = %q, want %q", final.Answer, "13 * 7 = 91")
-	}
-
-	if _, ok := events[6].(RunEndEvent); !ok {
-		t.Fatalf("event[6] = %T, want RunEndEvent", events[6])
+	if len(final.Message.ToolCalls) != 0 {
+		t.Fatalf("MessageEndEvent.Message.ToolCalls len = %d, want 0", len(final.Message.ToolCalls))
 	}
 }
 
@@ -755,7 +753,7 @@ func TestAgentRunResultReturnsContextCancellationWhenStreamClosesWithoutTerminal
 	}
 }
 
-func TestAgentStreamAgentMessagesClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvalid(t *testing.T) {
+func TestAgentStreamClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvalid(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -765,7 +763,7 @@ func TestAgentStreamAgentMessagesClosesWithoutEventWhenContextAlreadyCanceledAnd
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
-	stream := a.StreamAgentMessages(ctx, []Message{
+	stream := a.Stream(ctx, []Message{
 		AssistantMessage{},
 		UserMessage{Content: "continue"},
 	})
@@ -773,10 +771,10 @@ func TestAgentStreamAgentMessagesClosesWithoutEventWhenContextAlreadyCanceledAnd
 	select {
 	case event, ok := <-stream:
 		if ok {
-			t.Fatalf("StreamAgentMessages() delivered %T (%#v), want closed stream without event", event, event)
+			t.Fatalf("Stream() delivered %T (%#v), want closed stream without event", event, event)
 		}
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("StreamAgentMessages() did not close promptly")
+		t.Fatal("Stream() did not close promptly")
 	}
 }
 
