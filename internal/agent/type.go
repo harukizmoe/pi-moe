@@ -18,6 +18,8 @@ type RunResult struct {
 	Answer string
 	// ToolRounds 记录本次运行完成了多少轮 tool calling。
 	ToolRounds int
+	// Messages 是输入 history 加上本轮运行追加消息后的强语义 transcript。
+	Messages []Message
 	// Steps 记录每次工具执行的输入、输出和错误。
 	Steps []Step
 }
