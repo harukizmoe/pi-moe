@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 
-	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/harness"
 	"harukizmoe/pimoe/internal/logger"
 )
@@ -49,12 +48,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	result, err := runner.Run(context.Background(), input)
+	session := runner.NewSession()
+	output, err := collectRunOutput(session.Prompt(context.Background(), input))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Print(formatRunResult(result, opts.includeTrace))
+	fmt.Print(formatRunOutput(output, opts.includeTrace))
 }
 
 type cliOptions struct {
@@ -94,28 +94,87 @@ func readInput(args []string, stdin io.Reader) (string, error) {
 	return input, nil
 }
 
-func formatRunResult(result *agent.RunResult, includeTrace bool) string {
-	if result == nil {
-		return ""
+type runOutput struct {
+	Answer string
+	Steps  []toolStep
+}
+
+type toolStep struct {
+	ToolCallID string
+	ToolName   string
+	Arguments  string
+	Result     string
+	Error      string
+}
+
+func collectRunOutput(events <-chan harness.Event) (runOutput, error) {
+	var output runOutput
+	stepByCallID := make(map[string]int)
+
+	for event := range events {
+		switch event := event.(type) {
+		case harness.ToolExecutionStartEvent:
+			stepByCallID[event.ToolCallID] = len(output.Steps)
+			output.Steps = append(output.Steps, toolStep{
+				ToolCallID: event.ToolCallID,
+				ToolName:   event.ToolName,
+				Arguments:  event.Arguments,
+			})
+		case harness.ToolExecutionEndEvent:
+			stepIndex, ok := stepByCallID[event.ToolCallID]
+			if !ok {
+				stepIndex = len(output.Steps)
+				stepByCallID[event.ToolCallID] = stepIndex
+				output.Steps = append(output.Steps, toolStep{ToolCallID: event.ToolCallID, ToolName: event.Result.ToolName})
+			}
+			if event.Error != nil {
+				output.Steps[stepIndex].Error = event.Error.Error()
+			} else if event.Result.IsError {
+				output.Steps[stepIndex].Error = event.Result.Content
+			} else {
+				output.Steps[stepIndex].Result = event.Result.Content
+			}
+		case harness.MessageEndEvent:
+			if len(event.Message.ToolCalls) == 0 {
+				output.Answer = event.Message.Content
+			}
+		case harness.ErrorEvent:
+			if event.Error != nil {
+				return output, event.Error
+			}
+		}
 	}
 
-	var out strings.Builder
-	out.WriteString(result.Answer)
-	out.WriteByte('\n')
+	return output, nil
+}
+
+func formatRunOutput(output runOutput, includeTrace bool) string {
+	var builder strings.Builder
+	builder.WriteString(output.Answer)
+	builder.WriteByte('\n')
+
 	if !includeTrace {
-		return out.String()
+		return builder.String()
 	}
 
-	for _, step := range result.Steps {
-		fmt.Fprintf(&out, "tool=%s arguments=%s", step.ToolName, step.Arguments)
-		if step.Result != "" {
-			fmt.Fprintf(&out, " result=%s", step.Result)
-		}
+	for _, step := range output.Steps {
+		builder.WriteString("\n")
+		builder.WriteString("tool=")
+		builder.WriteString(step.ToolName)
+		builder.WriteByte('\n')
+		builder.WriteString("arguments=")
+		builder.WriteString(step.Arguments)
+		builder.WriteByte('\n')
 		if step.Error != "" {
-			fmt.Fprintf(&out, " error=%s", step.Error)
+			builder.WriteString("error=")
+			builder.WriteString(step.Error)
+			builder.WriteByte('\n')
+			continue
 		}
-		out.WriteByte('\n')
+		builder.WriteString("result=")
+		builder.WriteString(step.Result)
+		builder.WriteByte('\n')
 	}
 
-	return out.String()
+	return builder.String()
 }

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"harukizmoe/pimoe/internal/agent"
+	"harukizmoe/pimoe/internal/harness"
 )
 
 func TestReadInputJoinsArgsIntoPrompt(t *testing.T) {
@@ -97,48 +99,43 @@ func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
 	}
 }
 
-func TestFormatRunResultAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
-	result := &agent.RunResult{
-		Answer: "done without tools",
-		Steps: []agent.Step{{
-			ToolName:  "calculator",
-			Arguments: `{"a":2,"b":3,"op":"add"}`,
-			Result:    "5",
-		}},
+func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
+	output, err := collectRunOutput(eventStream(
+		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "done without tools"}},
+		harness.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
 	}
 
-	got := formatRunResult(result, false)
+	got := formatRunOutput(output, false)
 
 	const want = "done without tools\n"
 	if got != want {
-		t.Fatalf("formatRunResult(answer only) = %q, want %q", got, want)
+		t.Fatalf("formatRunOutput(answer only) = %q, want %q", got, want)
 	}
 	if strings.Contains(got, "tool=") || strings.Contains(got, "arguments=") || strings.Contains(got, "result=") || strings.Contains(got, "error=") {
-		t.Fatalf("formatRunResult(answer only) leaked trace fields: %q", got)
+		t.Fatalf("formatRunOutput(answer only) leaked trace fields: %q", got)
 	}
 }
 
-func TestFormatRunResultTraceIncludesSuccessfulToolSteps(t *testing.T) {
-	result := &agent.RunResult{
-		Answer: "final answer: 20",
-		Steps: []agent.Step{
-			{
-				ToolName:  "calculator",
-				Arguments: `{"a":2,"b":3,"op":"add"}`,
-				Result:    "5",
-			},
-			{
-				ToolName:  "calculator",
-				Arguments: `{"a":5,"b":4,"op":"multiply"}`,
-				Result:    "20",
-			},
-		},
+func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
+	output, err := collectRunOutput(eventStream(
+		harness.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
+		harness.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
+		harness.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
+		harness.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
+		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
+		harness.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
 	}
 
-	got := formatRunResult(result, true)
+	got := formatRunOutput(output, true)
 
 	if !strings.HasPrefix(got, "final answer: 20\n") {
-		t.Fatalf("formatRunResult(trace) prefix = %q, want answer followed by newline", got)
+		t.Fatalf("formatRunOutput(trace) prefix = %q, want answer followed by newline", got)
 	}
 	for _, want := range []string{
 		"tool=calculator",
@@ -148,25 +145,27 @@ func TestFormatRunResultTraceIncludesSuccessfulToolSteps(t *testing.T) {
 		"result=20",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("formatRunResult(trace) missing %q in %q", want, got)
+			t.Fatalf("formatRunOutput(trace) missing %q in %q", want, got)
 		}
 	}
 }
 
-func TestFormatRunResultTraceIncludesToolErrors(t *testing.T) {
-	result := &agent.RunResult{
-		Answer: "could not complete weather lookup",
-		Steps: []agent.Step{{
-			ToolName:  "weather",
-			Arguments: `{"city":"Tokyo"}`,
-			Error:     "upstream unavailable",
-		}},
+func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
+	toolErr := errors.New("upstream unavailable")
+	output, err := collectRunOutput(eventStream(
+		harness.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
+		harness.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
+		harness.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
+		harness.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
 	}
 
-	got := formatRunResult(result, true)
+	got := formatRunOutput(output, true)
 
 	if !strings.HasPrefix(got, "could not complete weather lookup\n") {
-		t.Fatalf("formatRunResult(trace error) prefix = %q, want answer followed by newline", got)
+		t.Fatalf("formatRunOutput(trace error) prefix = %q, want answer followed by newline", got)
 	}
 	for _, want := range []string{
 		"tool=weather",
@@ -174,10 +173,19 @@ func TestFormatRunResultTraceIncludesToolErrors(t *testing.T) {
 		"error=upstream unavailable",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("formatRunResult(trace error) missing %q in %q", want, got)
+			t.Fatalf("formatRunOutput(trace error) missing %q in %q", want, got)
 		}
 	}
 	if strings.Contains(got, "result=<nil>") {
-		t.Fatalf("formatRunResult(trace error) exposed nil result placeholder: %q", got)
+		t.Fatalf("formatRunOutput(trace error) exposed nil result placeholder: %q", got)
 	}
+}
+
+func eventStream(events ...harness.Event) <-chan harness.Event {
+	stream := make(chan harness.Event, len(events))
+	for _, event := range events {
+		stream <- event
+	}
+	close(stream)
+	return stream
 }
