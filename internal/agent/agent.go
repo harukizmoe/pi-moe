@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+
 	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/tools"
@@ -16,13 +18,15 @@ type Options struct {
 	MaxSteps int
 }
 
-// Agent 负责驱动一次非流式的 tool calling 主循环。
+// Agent 负责驱动一次基于事件流的 tool calling 主循环。
 type Agent struct {
 	provider llms.Provider
 	tools    *tools.Registry
 	model    string
 	logger   logger.Logger
 	maxSteps int
+	// StreamAgentMessages 保留给尚未迁移的旧测试；新调用方应改用 Stream。
+	StreamAgentMessages func(context.Context, []Message) <-chan Event
 }
 
 // New 创建一个绑定固定 Provider、工具注册表和模型名的 Agent。
@@ -46,11 +50,13 @@ func NewWithOptions(provider llms.Provider, tools *tools.Registry, model string,
 		maxSteps = defaultMaxSteps
 	}
 
-	return &Agent{
+	agent := &Agent{
 		provider: provider,
 		tools:    tools,
 		model:    model,
 		logger:   log,
 		maxSteps: maxSteps,
 	}
+	agent.StreamAgentMessages = agent.Stream
+	return agent
 }

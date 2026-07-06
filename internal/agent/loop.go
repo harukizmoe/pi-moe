@@ -4,35 +4,28 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"harukizmoe/pimoe/internal/llms"
 )
 
-// RunAgentMessages 从调用方提供的强语义无状态对话历史继续执行 tool calling 主循环。
-func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunResult, error) {
-	stream := make(chan Event)
-	finalMessages := make(chan []Message, 1)
-	go func() {
-		defer close(stream)
-		finalMessages <- a.streamAgentMessages(ctx, messages, stream)
-	}()
+var nextRunSequence atomic.Uint64
 
-	result, err := collectRunResult(ctx, stream)
-	result.Messages = <-finalMessages
-	return result, err
-}
-
-// StreamAgentMessages 从强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。
-func (a *Agent) StreamAgentMessages(ctx context.Context, messages []Message) <-chan Event {
+// Stream 从调用方提供的强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。
+func (a *Agent) Stream(ctx context.Context, messages []Message) <-chan Event {
 	stream := make(chan Event)
 	go func() {
 		defer close(stream)
-		_ = a.streamAgentMessages(ctx, messages, stream)
+		a.stream(ctx, messages, stream)
 	}()
 	return stream
 }
 
-func (a *Agent) streamAgentMessages(ctx context.Context, messages []Message, stream chan<- Event) []Message {
+func newRunID() string {
+	return fmt.Sprintf("run-%d", nextRunSequence.Add(1))
+}
+
+func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Event) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -42,35 +35,37 @@ func (a *Agent) streamAgentMessages(ctx context.Context, messages []Message, str
 
 	if len(messages) == 0 {
 		emit(ErrorEvent{Error: fmt.Errorf("messages must not be empty")})
-		return nil
+		return
 	}
 	lastMessage, ok := messages[len(messages)-1].(UserMessage)
 	if !ok || strings.TrimSpace(lastMessage.Content) == "" {
 		emit(ErrorEvent{Error: fmt.Errorf("last message must be a non-empty user message")})
-		return nil
+		return
 	}
 
-	messages = append([]Message(nil), messages...)
+	messages = cloneMessages(messages)
 	if _, err := toLLMMessages(messages); err != nil {
 		emit(ErrorEvent{Error: err})
-		return nil
+		return
 	}
 
+	runID := newRunID()
+	turn := countUserMessages(messages)
 	toolSchemas := a.tools.Schemas()
 	trimmedInput := strings.TrimSpace(lastMessage.Content)
 	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", trimmedInput)
-	if !emit(RunStartEvent{Input: trimmedInput}) {
-		return messages
+	if !emit(RunStartEvent{RunID: runID}) {
+		return
 	}
+	if !emit(TurnStartEvent{RunID: runID, Turn: turn, UserMessage: UserMessage{Content: trimmedInput}}) {
+		return
+	}
+
 	for chatRound := 0; ; chatRound++ {
 		llmMessages, err := toLLMMessages(messages)
 		if err != nil {
-			emit(ErrorEvent{Error: err})
-			return messages
-		}
-		round := chatRound + 1
-		if !emit(LLMRequestEvent{Round: round}) {
-			return messages
+			emit(ErrorEvent{RunID: runID, Error: err})
+			return
 		}
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		response, err := a.provider.Chat(ctx, llms.ChatRequest{
@@ -80,14 +75,12 @@ func (a *Agent) streamAgentMessages(ctx context.Context, messages []Message, str
 		})
 		if err != nil {
 			a.logLLMError(ctx, chatRound, err)
-			if !emit(LLMErrorEvent{Round: round, Error: err}) {
-				return messages
-			}
-			emit(ErrorEvent{Error: fmt.Errorf("llm chat round %d: %w", round, err)})
-			return messages
+			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("llm chat round %d: %w", chatRound+1, err)})
+			return
 		}
-		if ctx.Err() != nil {
-			return messages
+		if err := ctx.Err(); err != nil {
+			emitCancellation(stream, ErrorEvent{RunID: runID, Error: err})
+			return
 		}
 
 		assistantMessage := AssistantMessage{
@@ -95,32 +88,37 @@ func (a *Agent) streamAgentMessages(ctx context.Context, messages []Message, str
 			ToolCalls: append([]llms.ToolCall(nil), response.Message.ToolCalls...),
 		}
 		if _, err := toLLMMessage(assistantMessage); err != nil {
-			emit(ErrorEvent{Error: fmt.Errorf("assistant response: %w", err)})
-			return messages
+			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("assistant response: %w", err)})
+			return
 		}
+
+		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
+		if !emitAssistantLifecycle(emit, runID, messageID, assistantMessage) {
+			return
+		}
+
 		if len(assistantMessage.ToolCalls) == 0 {
 			messages = append(messages, assistantMessage)
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
-			if !emit(FinalEvent{Answer: assistantMessage.Content}) {
-				return messages
+			if !emit(TurnEndEvent{RunID: runID, Turn: turn}) {
+				return
 			}
-			emit(RunEndEvent{Answer: assistantMessage.Content})
-			return messages
+			emit(RunEndEvent{RunID: runID})
+			return
 		}
 
 		if chatRound >= a.maxSteps {
 			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
-			emit(ErrorEvent{Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
-			return messages
+			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
+			return
 		}
 
-		toolRound := chatRound + 1
 		a.logger.Info(ctx, "agent.tool_calls.received", "count", len(assistantMessage.ToolCalls))
 		messages = append(messages, assistantMessage)
 		for _, call := range assistantMessage.ToolCalls {
 			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "arguments", call.Function.Arguments)
-			if !emit(ToolCallEvent{Round: toolRound, ToolName: call.Function.Name, ToolCallID: call.ID, Arguments: call.Function.Arguments}) {
-				return messages
+			if !emit(ToolExecutionStartEvent{RunID: runID, ToolName: call.Function.Name, ToolCallID: call.ID, Arguments: call.Function.Arguments}) {
+				return
 			}
 
 			toolMessage, err := a.runToolCall(ctx, call)
@@ -129,74 +127,76 @@ func (a *Agent) streamAgentMessages(ctx context.Context, messages []Message, str
 			} else {
 				a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
 			}
-			if !emit(ToolResultEvent{Round: toolRound, ToolName: call.Function.Name, ToolCallID: call.ID, Result: toolMessage.Content, Error: err}) {
-				return messages
+			if !emit(ToolExecutionEndEvent{RunID: runID, ToolCallID: call.ID, Result: toolMessage, Error: err}) {
+				return
 			}
 			messages = append(messages, toolMessage)
 		}
 	}
 }
 
-func collectRunResult(ctx context.Context, stream <-chan Event) (*RunResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
+func emitAssistantLifecycle(emit func(Event) bool, runID string, messageID string, message AssistantMessage) bool {
+	if !emit(MessageStartEvent{RunID: runID, MessageID: messageID, Role: "assistant"}) {
+		return false
 	}
-	result := &RunResult{}
-	stepByCallID := make(map[string]int)
-	var observedErr error
-	var terminalErr error
-	terminal := false
-
-	for event := range stream {
-		switch event := event.(type) {
-		case ToolCallEvent:
-			stepByCallID[event.ToolCallID] = len(result.Steps)
-			result.Steps = append(result.Steps, Step{
-				ToolCallID: event.ToolCallID,
-				ToolName:   event.ToolName,
-				Arguments:  event.Arguments,
-			})
-		case ToolResultEvent:
-			if event.Round > result.ToolRounds {
-				result.ToolRounds = event.Round
-			}
-			stepIndex, ok := stepByCallID[event.ToolCallID]
-			if !ok {
-				stepIndex = len(result.Steps)
-				stepByCallID[event.ToolCallID] = stepIndex
-				result.Steps = append(result.Steps, Step{ToolCallID: event.ToolCallID, ToolName: event.ToolName})
-			}
-			if event.Error != nil {
-				result.Steps[stepIndex].Error = event.Error.Error()
-			} else {
-				result.Steps[stepIndex].Result = event.Result
-			}
-		case FinalEvent:
-			result.Answer = event.Answer
-		case RunEndEvent:
-			terminal = true
-		case LLMErrorEvent:
-			if observedErr == nil {
-				observedErr = event.Error
-			}
-		case ErrorEvent:
-			terminal = true
-			terminalErr = event.Error
+	if strings.TrimSpace(message.Content) != "" {
+		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaText, ContentIndex: 0, Delta: message.Content}) {
+			return false
 		}
 	}
-
-	if terminalErr != nil {
-		return result, terminalErr
-	}
-	if !terminal {
-		if err := ctx.Err(); err != nil {
-			return result, err
+	for i, call := range message.ToolCalls {
+		if strings.TrimSpace(call.Function.Arguments) == "" {
+			continue
+		}
+		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaToolCall, ContentIndex: i, Delta: call.Function.Arguments}) {
+			return false
 		}
 	}
-	if observedErr != nil {
-		return result, observedErr
+	return emit(MessageEndEvent{RunID: runID, MessageID: messageID, Message: cloneAssistantMessage(message)})
+}
+
+func countUserMessages(messages []Message) int {
+	turn := 0
+	for _, message := range messages {
+		if _, ok := message.(UserMessage); ok {
+			turn++
+		}
 	}
-	return result, nil
+	if turn < 1 {
+		return 1
+	}
+	return turn
+}
+
+func cloneMessages(messages []Message) []Message {
+	out := make([]Message, len(messages))
+	for i, message := range messages {
+		switch msg := message.(type) {
+		case UserMessage:
+			out[i] = msg
+		case AssistantMessage:
+			out[i] = cloneAssistantMessage(msg)
+		case ToolResultMessage:
+			out[i] = msg
+		default:
+			out[i] = message
+		}
+	}
+	return out
+}
+
+func cloneAssistantMessage(message AssistantMessage) AssistantMessage {
+	return AssistantMessage{
+		Content:   message.Content,
+		ToolCalls: append([]llms.ToolCall(nil), message.ToolCalls...),
+	}
+}
+
+func emitCancellation(stream chan<- Event, event Event) {
+	select {
+	case stream <- event:
+	default:
+	}
 }
 
 func emitEvent(ctx context.Context, stream chan<- Event, event Event) bool {

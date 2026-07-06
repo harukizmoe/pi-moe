@@ -6,39 +6,87 @@ type Event interface {
 	AgentEvent()
 }
 
+// MessageDeltaKind 标识一段 message 增量属于可见文本、thinking 还是 tool call 参数。
+type MessageDeltaKind string
+
+const (
+	// MessageDeltaText 表示 assistant 可见文本增量。
+	MessageDeltaText MessageDeltaKind = "text"
+	// MessageDeltaThinking 表示模型 reasoning/thinking 增量；当前 provider 暂不产生。
+	MessageDeltaThinking MessageDeltaKind = "thinking"
+	// MessageDeltaToolCall 表示 assistant tool call 参数增量。
+	MessageDeltaToolCall MessageDeltaKind = "tool_call"
+)
+
 // RunStartEvent 表示 Agent 已开始一次运行。
 type RunStartEvent struct {
-	// Input 是本次运行的用户输入摘要，已去除首尾空白。
-	Input string
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
 }
 
 // AgentEvent 标记 RunStartEvent 为 Agent 运行事件。
 func (RunStartEvent) AgentEvent() {}
 
-// LLMRequestEvent 表示 Agent 即将向 Provider 发起一次聊天请求。
-type LLMRequestEvent struct {
-	// Round 是从 1 开始计数的 LLM 请求轮次。
-	Round int
+// TurnStartEvent 表示 Agent 已开始处理当前用户 turn。
+type TurnStartEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
+	// Turn 是 transcript 中从 1 开始计数的当前用户 turn。
+	Turn int
+	// UserMessage 是触发本轮运行的用户消息。
+	UserMessage UserMessage
 }
 
-// AgentEvent 标记 LLMRequestEvent 为 Agent 运行事件。
-func (LLMRequestEvent) AgentEvent() {}
+// AgentEvent 标记 TurnStartEvent 为 Agent 运行事件。
+func (TurnStartEvent) AgentEvent() {}
 
-// LLMErrorEvent 表示 Provider 聊天请求返回错误。
-type LLMErrorEvent struct {
-	// Round 是发生错误的 LLM 请求轮次。
-	Round int
-	// Error 保存 Provider 返回的原始错误。
-	Error error
+// MessageStartEvent 表示一条 assistant message 开始生成。
+type MessageStartEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
+	// MessageID 是本条 assistant message 在本次运行内的稳定标识。
+	MessageID string
+	// Role 是消息角色；当前只会是 "assistant"。
+	Role string
 }
 
-// AgentEvent 标记 LLMErrorEvent 为 Agent 运行事件。
-func (LLMErrorEvent) AgentEvent() {}
+// AgentEvent 标记 MessageStartEvent 为 Agent 运行事件。
+func (MessageStartEvent) AgentEvent() {}
 
-// ToolCallEvent 表示模型已请求执行本地工具。
-type ToolCallEvent struct {
-	// Round 是触发该工具调用的 tool-calling 轮次，从 1 开始计数。
-	Round int
+// MessageDeltaEvent 表示一条 assistant message 的增量内容。
+type MessageDeltaEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
+	// MessageID 关联对应的 MessageStartEvent 和 MessageEndEvent。
+	MessageID string
+	// Kind 标识增量类型。
+	Kind MessageDeltaKind
+	// ContentIndex 是同类内容块在当前 message 中的下标。
+	ContentIndex int
+	// Delta 是本次输出的增量文本；非 streaming provider 可一次性输出完整内容。
+	Delta string
+}
+
+// AgentEvent 标记 MessageDeltaEvent 为 Agent 运行事件。
+func (MessageDeltaEvent) AgentEvent() {}
+
+// MessageEndEvent 表示一条 assistant message 已完整生成。
+type MessageEndEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
+	// MessageID 关联对应的 MessageStartEvent。
+	MessageID string
+	// Message 是可持久化到 transcript 的完整 assistant message。
+	Message AssistantMessage
+}
+
+// AgentEvent 标记 MessageEndEvent 为 Agent 运行事件。
+func (MessageEndEvent) AgentEvent() {}
+
+// ToolExecutionStartEvent 表示本地工具开始执行。
+type ToolExecutionStartEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
 	// ToolCallID 是模型生成的 tool call 标识。
 	ToolCallID string
 	// ToolName 是被调用的本地工具名称。
@@ -47,39 +95,39 @@ type ToolCallEvent struct {
 	Arguments string
 }
 
-// AgentEvent 标记 ToolCallEvent 为 Agent 运行事件。
-func (ToolCallEvent) AgentEvent() {}
+// AgentEvent 标记 ToolExecutionStartEvent 为 Agent 运行事件。
+func (ToolExecutionStartEvent) AgentEvent() {}
 
-// ToolResultEvent 表示本地工具已返回结果。
-type ToolResultEvent struct {
-	// Round 是该工具结果所属的 tool-calling 轮次，从 1 开始计数。
-	Round int
+// ToolExecutionEndEvent 表示本地工具已返回结果。
+type ToolExecutionEndEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
 	// ToolCallID 是模型生成的 tool call 标识。
 	ToolCallID string
-	// ToolName 是被调用的本地工具名称。
-	ToolName string
-	// Result 是工具成功执行后的文本结果；失败时保存可回传给模型的错误文本。
-	Result string
+	// Result 是可持久化到 transcript 的完整 tool result message。
+	Result ToolResultMessage
 	// Error 保存工具执行失败时的原始错误；成功时为空。
 	Error error
 }
 
-// AgentEvent 标记 ToolResultEvent 为 Agent 运行事件。
-func (ToolResultEvent) AgentEvent() {}
+// AgentEvent 标记 ToolExecutionEndEvent 为 Agent 运行事件。
+func (ToolExecutionEndEvent) AgentEvent() {}
 
-// FinalEvent 表示 Agent 已得到最终回答。
-type FinalEvent struct {
-	// Answer 是模型完成工具调用后返回的最终回答。
-	Answer string
+// TurnEndEvent 表示当前用户 turn 已结束。
+type TurnEndEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
+	// Turn 是 transcript 中从 1 开始计数的当前用户 turn。
+	Turn int
 }
 
-// AgentEvent 标记 FinalEvent 为 Agent 运行事件。
-func (FinalEvent) AgentEvent() {}
+// AgentEvent 标记 TurnEndEvent 为 Agent 运行事件。
+func (TurnEndEvent) AgentEvent() {}
 
 // RunEndEvent 表示 Agent 已成功结束一次运行。
 type RunEndEvent struct {
-	// Answer 是运行结束时的最终回答，便于只订阅生命周期事件的调用方展示。
-	Answer string
+	// RunID 是本次运行内所有事件共享的稳定标识。
+	RunID string
 }
 
 // AgentEvent 标记 RunEndEvent 为 Agent 运行事件。
@@ -87,9 +135,59 @@ func (RunEndEvent) AgentEvent() {}
 
 // ErrorEvent 表示 Agent 运行因错误结束。
 type ErrorEvent struct {
+	// RunID 是本次运行内所有事件共享的稳定标识；输入校验失败时可能为空。
+	RunID string
 	// Error 保存导致运行结束的错误。
 	Error error
 }
 
 // AgentEvent 标记 ErrorEvent 为 Agent 运行事件。
 func (ErrorEvent) AgentEvent() {}
+
+// LLMRequestEvent 保留给尚未迁移的旧测试；新循环不会再发出该事件。
+type LLMRequestEvent struct {
+	Round int
+}
+
+// AgentEvent 标记 LLMRequestEvent 为 Agent 运行事件。
+func (LLMRequestEvent) AgentEvent() {}
+
+// LLMErrorEvent 保留给尚未迁移的旧测试；新循环不会再发出该事件。
+type LLMErrorEvent struct {
+	Round int
+	Error error
+}
+
+// AgentEvent 标记 LLMErrorEvent 为 Agent 运行事件。
+func (LLMErrorEvent) AgentEvent() {}
+
+// ToolCallEvent 保留给尚未迁移的旧测试；新循环不会再发出该事件。
+type ToolCallEvent struct {
+	Round int
+	ToolCallID string
+	ToolName   string
+	Arguments  string
+}
+
+// AgentEvent 标记 ToolCallEvent 为 Agent 运行事件。
+func (ToolCallEvent) AgentEvent() {}
+
+// ToolResultEvent 保留给尚未迁移的旧测试；新循环不会再发出该事件。
+type ToolResultEvent struct {
+	Round      int
+	ToolCallID string
+	ToolName   string
+	Result     string
+	Error      error
+}
+
+// AgentEvent 标记 ToolResultEvent 为 Agent 运行事件。
+func (ToolResultEvent) AgentEvent() {}
+
+// FinalEvent 保留给尚未迁移的旧测试；新循环不会再发出该事件。
+type FinalEvent struct {
+	Answer string
+}
+
+// AgentEvent 标记 FinalEvent 为 Agent 运行事件。
+func (FinalEvent) AgentEvent() {}
