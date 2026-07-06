@@ -4,12 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"harukizmoe/pimoe/internal/agent"
-	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 )
 
@@ -195,89 +193,6 @@ func TestRunTrimsSurroundingWhitespaceBeforePassingInputOnward(t *testing.T) {
 	}
 	if got.Answer != "13 * 7 = 91" {
 		t.Fatalf("Run().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
-	}
-}
-
-func TestRunMessagesRejectsEmptyFinalUserMessageAfterTrim(t *testing.T) {
-	h := newFakeHarness(t)
-
-	tests := []struct {
-		name     string
-		messages []llms.Message
-	}{
-		{
-			name: "empty content",
-			messages: []llms.Message{{
-				Role:    llms.RoleUser,
-				Content: "",
-			}},
-		},
-		{
-			name: "whitespace only content",
-			messages: []llms.Message{{
-				Role:    llms.RoleUser,
-				Content: " \n\t ",
-			}},
-		},
-		{
-			name: "history ending in whitespace only user message",
-			messages: []llms.Message{
-				{Role: llms.RoleAssistant, Content: "Need anything else?"},
-				{Role: llms.RoleUser, Content: "   \t"},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := h.RunMessages(context.Background(), tt.messages)
-			if err == nil {
-				t.Fatal("RunMessages() error = nil, want empty input error")
-			}
-			if !strings.Contains(err.Error(), "empty input") {
-				t.Fatalf("RunMessages() error = %v, want empty input message", err)
-			}
-		})
-	}
-}
-
-func TestRunMessagesContinuesHistoryEndingWithUserMessage(t *testing.T) {
-	h := newFakeHarness(t)
-
-	got, err := h.RunMessages(context.Background(), []llms.Message{
-		{Role: llms.RoleAssistant, Content: "Let's continue from the earlier steps."},
-		{Role: llms.RoleUser, Content: "  use calculator to compute 13 * 7  "},
-	})
-	if err != nil {
-		t.Fatalf("RunMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunMessages() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("RunMessages().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
-	}
-}
-
-func TestRunMatchesRunMessagesForSingleUserInput(t *testing.T) {
-	h := newFakeHarness(t)
-	ctx := context.Background()
-
-	gotRun, err := h.Run(ctx, "  use calculator to compute 13 * 7  ")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	gotRunMessages, err := h.RunMessages(ctx, []llms.Message{{
-		Role:    llms.RoleUser,
-		Content: "  use calculator to compute 13 * 7  ",
-	}})
-	if err != nil {
-		t.Fatalf("RunMessages() error = %v", err)
-	}
-
-	if !reflect.DeepEqual(gotRunMessages, gotRun) {
-		t.Fatalf("RunMessages() = %#v, want same result as Run() = %#v", gotRunMessages, gotRun)
 	}
 }
 

@@ -8,48 +8,9 @@ import (
 	"harukizmoe/pimoe/internal/llms"
 )
 
-// Run 执行一次有步数上限的 tool calling 主循环，并返回最终回答。
-func (a *Agent) Run(ctx context.Context, input string) (string, error) {
-	result, err := a.RunResult(ctx, input)
-	if err != nil {
-		return "", err
-	}
-	return result.Answer, nil
-}
-
-// RunResult 执行一次有步数上限的 tool calling 主循环，并返回结构化 trace。
-func (a *Agent) RunResult(ctx context.Context, input string) (*RunResult, error) {
-	return collectRunResult(ctx, a.Stream(ctx, input))
-}
-
-// RunMessages 从调用方提供的无状态 LLM DTO 历史继续执行 tool calling 主循环。
-func (a *Agent) RunMessages(ctx context.Context, messages []llms.Message) (*RunResult, error) {
-	return collectRunResult(ctx, a.StreamMessages(ctx, messages))
-}
-
 // RunAgentMessages 从调用方提供的强语义无状态对话历史继续执行 tool calling 主循环。
 func (a *Agent) RunAgentMessages(ctx context.Context, messages []Message) (*RunResult, error) {
 	return collectRunResult(ctx, a.StreamAgentMessages(ctx, messages))
-}
-
-// Stream 执行一次 Agent 运行，并通过 channel 实时返回运行事件。
-func (a *Agent) Stream(ctx context.Context, input string) <-chan Event {
-	return a.StreamAgentMessages(ctx, []Message{UserMessage{Content: input}})
-}
-
-// StreamMessages 从无状态 LLM DTO 历史继续执行 Agent，并通过 channel 返回运行事件。
-func (a *Agent) StreamMessages(ctx context.Context, messages []llms.Message) <-chan Event {
-	stream := make(chan Event)
-	go func() {
-		defer close(stream)
-		agentMessages, err := fromLLMMessages(messages)
-		if err != nil {
-			emitEvent(ctx, stream, ErrorEvent{Error: err})
-			return
-		}
-		a.streamAgentMessages(ctx, agentMessages, stream)
-	}()
-	return stream
 }
 
 // StreamAgentMessages 从强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。

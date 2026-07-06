@@ -87,7 +87,7 @@ func (h *Harness) Stream(ctx context.Context, input string) <-chan Event {
 			emitHarnessError(ctx, stream, fmt.Errorf("empty input"))
 			return
 		}
-		for event := range h.agent.Stream(ctx, input) {
+		for event := range h.agent.StreamAgentMessages(ctx, []agent.Message{agent.UserMessage{Content: input}}) {
 			if !emitHarnessEvent(ctx, stream, event) {
 				return
 			}
@@ -132,20 +132,4 @@ func (h *Harness) RunAgentMessages(ctx context.Context, messages []agent.Message
 	}
 
 	return h.agent.RunAgentMessages(ctx, messages)
-}
-
-// RunMessages 从调用方提供的无状态 LLM DTO 历史继续执行 Agent。
-func (h *Harness) RunMessages(ctx context.Context, messages []llms.Message) (*agent.RunResult, error) {
-	if len(messages) == 0 {
-		return nil, fmt.Errorf("empty input")
-	}
-
-	messages = append([]llms.Message(nil), messages...)
-	lastIndex := len(messages) - 1
-	messages[lastIndex].Content = strings.TrimSpace(messages[lastIndex].Content)
-	if messages[lastIndex].Role == llms.RoleUser && messages[lastIndex].Content == "" {
-		return nil, fmt.Errorf("empty input")
-	}
-
-	return h.agent.RunMessages(ctx, messages)
 }
