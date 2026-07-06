@@ -580,6 +580,31 @@ func TestAgentStreamReturnsContextCancellationWhenCanceledAfterChat(t *testing.T
 	}
 }
 
+func TestAgentStreamReturnsCancellationErrorWhenContextAlreadyCanceledWithValidMessages(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+		t.Fatal("provider.Chat() should not be called for canceled context")
+		return nil, nil
+	})}
+
+	a := New(provider, tools.NewRegistry(), "fake-tool-model")
+	events := collectStreamEvents(t, a.Stream(ctx, []Message{
+		UserMessage{Content: "continue"},
+	}))
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	errEvent, ok := events[0].(ErrorEvent)
+	if !ok {
+		t.Fatalf("event[0] type = %T, want ErrorEvent", events[0])
+	}
+	if !errors.Is(errEvent.Error, context.Canceled) {
+		t.Fatalf("stream error = %v, want context cancellation", errEvent.Error)
+	}
+}
+
 func TestAgentStreamClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvalid(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

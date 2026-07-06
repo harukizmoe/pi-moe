@@ -43,8 +43,8 @@ func (s *Session) Prompt(ctx context.Context, input string) <-chan Event {
 	if trimmed == "" {
 		return closedErrorStream(fmt.Errorf("empty input"))
 	}
-	if ctx.Err() != nil {
-		return closedStream()
+	if err := ctx.Err(); err != nil {
+		return closedErrorStream(err)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -191,12 +191,6 @@ func emitSessionTerminal(stream chan<- Event, event Event) {
 	case stream <- event:
 	default:
 	}
-}
-
-func closedStream() <-chan Event {
-	stream := make(chan Event)
-	close(stream)
-	return stream
 }
 
 func closedErrorStream(err error) <-chan Event {

@@ -48,6 +48,10 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 		emit(ErrorEvent{Error: err})
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		emitCancellation(stream, ErrorEvent{Error: err})
+		return
+	}
 
 	runID := newRunID()
 	turn := countUserMessages(messages)

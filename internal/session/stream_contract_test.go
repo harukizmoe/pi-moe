@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func collectSessionStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-func TestSessionPromptWithAlreadyCanceledContextClosesPromptlyAndLeavesTranscriptEmpty(t *testing.T) {
+func TestSessionPromptWithAlreadyCanceledContextEmitsCancellationErrorAndLeavesTranscriptEmpty(t *testing.T) {
 	oldMaxProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() {
 		runtime.GOMAXPROCS(oldMaxProcs)
@@ -26,28 +27,29 @@ func TestSessionPromptWithAlreadyCanceledContextClosesPromptlyAndLeavesTranscrip
 
 	s := newFakeSession(t)
 
-	type streamResult struct {
-		event Event
-		ok    bool
-	}
-
 	for attempt := range 32 {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
 		stream := s.Prompt(ctx, "use calculator to compute 13 * 7")
-		resultCh := make(chan streamResult, 1)
+		resultCh := make(chan []Event, 1)
 		go func() {
-			event, ok := <-stream
-			resultCh <- streamResult{event: event, ok: ok}
+			resultCh <- collectSessionStreamEvents(t, stream)
 		}()
 
 		runtime.Gosched()
 
 		select {
-		case result := <-resultCh:
-			if result.ok {
-				t.Fatalf("attempt %d: Prompt() delivered %T (%#v), want closed stream without event", attempt, result.event, result.event)
+		case events := <-resultCh:
+			if len(events) != 1 {
+				t.Fatalf("attempt %d: Prompt() events len = %d, want 1", attempt, len(events))
+			}
+			errEvent, ok := events[0].(ErrorEvent)
+			if !ok {
+				t.Fatalf("attempt %d: Prompt() event[0] = %T, want ErrorEvent", attempt, events[0])
+			}
+			if !errors.Is(errEvent.Error, context.Canceled) {
+				t.Fatalf("attempt %d: Prompt() ErrorEvent.Error = %v, want context cancellation", attempt, errEvent.Error)
 			}
 		case <-time.After(200 * time.Millisecond):
 			t.Fatal("Prompt() did not close promptly")
