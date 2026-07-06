@@ -2,17 +2,11 @@ package harness
 
 import (
 	"context"
-	"reflect"
 	"runtime"
 	"testing"
 	"time"
 )
 
-type harnessStreamer interface {
-	Stream(context.Context, string) <-chan Event
-}
-
-var _ harnessStreamer = (*Harness)(nil)
 
 func collectHarnessStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	t.Helper()
@@ -25,7 +19,7 @@ func collectHarnessStreamEvents(t *testing.T, stream <-chan Event) []Event {
 	return events
 }
 
-func TestStreamClosesWithoutEventWhenContextAlreadyCanceledAndInputEmpty(t *testing.T) {
+func TestSessionPromptClosesWithoutEventWhenContextAlreadyCanceled(t *testing.T) {
 	oldMaxProcs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() {
 		runtime.GOMAXPROCS(oldMaxProcs)
@@ -38,11 +32,12 @@ func TestStreamClosesWithoutEventWhenContextAlreadyCanceledAndInputEmpty(t *test
 		ok    bool
 	}
 
-	for attempt := 0; attempt < 32; attempt++ {
+	for attempt := range 32 {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		stream := h.Stream(ctx, "")
+		session := h.NewSession()
+		stream := session.Prompt(ctx, "use calculator to compute 13 * 7")
 		resultCh := make(chan streamResult, 1)
 		go func() {
 			event, ok := <-stream
@@ -54,17 +49,17 @@ func TestStreamClosesWithoutEventWhenContextAlreadyCanceledAndInputEmpty(t *test
 		select {
 		case result := <-resultCh:
 			if result.ok {
-				t.Fatalf("attempt %d: Stream() delivered %T (%#v), want closed stream without event", attempt, result.event, result.event)
+				t.Fatalf("attempt %d: Prompt() delivered %T (%#v), want closed stream without event", attempt, result.event, result.event)
 			}
 		case <-time.After(200 * time.Millisecond):
-			t.Fatal("Stream() did not close promptly")
+			t.Fatal("Prompt() did not close promptly")
 		}
 	}
 }
 
-func TestStreamReturnsTypedToolCallingEvents(t *testing.T) {
+func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
 	h := newFakeHarness(t)
-	events := collectHarnessStreamEvents(t, h.Stream(context.Background(), "use calculator to compute 13 * 7"))
+	events := collectHarnessStreamEvents(t, h.NewSession().Prompt(context.Background(), "use calculator to compute 13 * 7"))
 
 	assertHarnessEventTypes(t, events,
 		RunStartEvent{},
@@ -149,41 +144,3 @@ func TestStreamReturnsTypedToolCallingEvents(t *testing.T) {
 	}
 }
 
-func TestRunReturnsToolTraceWithoutEventHistory(t *testing.T) {
-	h := newFakeHarness(t)
-
-	got, err := h.Run(context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("Run() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("Run().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
-	}
-	if got.ToolRounds != 1 {
-		t.Fatalf("Run().ToolRounds = %d, want 1", got.ToolRounds)
-	}
-	if len(got.Steps) != 1 {
-		t.Fatalf("Run().Steps len = %d, want 1", len(got.Steps))
-	}
-
-	step := got.Steps[0]
-	if step.ToolName != "calculator" {
-		t.Fatalf("Run().Steps[0].ToolName = %q, want calculator", step.ToolName)
-	}
-	if step.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("Run().Steps[0].Arguments = %q", step.Arguments)
-	}
-	if step.Result != "91" {
-		t.Fatalf("Run().Steps[0].Result = %q, want 91", step.Result)
-	}
-	if step.Error != "" {
-		t.Fatalf("Run().Steps[0].Error = %q, want empty", step.Error)
-	}
-
-	if _, ok := reflect.TypeOf(*got).FieldByName("Events"); ok {
-		t.Fatalf("Run() result exposes deprecated Events field")
-	}
-}

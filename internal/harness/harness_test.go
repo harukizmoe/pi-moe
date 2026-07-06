@@ -7,11 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/logger"
 )
 
-func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
+func TestNewSessionUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 	providerConfigPath := writeProvidersConfig(t, `llms:
   default_provider: fake-local
   providers:
@@ -29,35 +28,9 @@ func TestNewRunUsesConfiguredFakeProviderAndCalculator(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	got, err := h.Run(context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("Run() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("Run().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
-	}
-	if got.ToolRounds != 1 {
-		t.Fatalf("Run().ToolRounds = %d, want 1", got.ToolRounds)
-	}
-	if len(got.Steps) != 1 {
-		t.Fatalf("Run().Steps len = %d, want 1", len(got.Steps))
-	}
-
-	step := got.Steps[0]
-	if step.ToolName != "calculator" {
-		t.Fatalf("Run().Steps[0].ToolName = %q, want calculator", step.ToolName)
-	}
-	if step.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("Run().Steps[0].Arguments = %q", step.Arguments)
-	}
-	if step.Result != "91" {
-		t.Fatalf("Run().Steps[0].Result = %q, want 91", step.Result)
-	}
-	if step.Error != "" {
-		t.Fatalf("Run().Steps[0].Error = %q, want empty", step.Error)
+	answer := collectHarnessAnswer(t, h.NewSession().Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	if answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
 	}
 }
 
@@ -83,12 +56,9 @@ func TestNewUsesProviderNameOverride(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	got, err := h.Run(context.Background(), "use calculator to compute 13 * 7")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got == nil || got.Answer != "13 * 7 = 91" {
-		t.Fatalf("Run().Answer = %#v, want %q", got, "13 * 7 = 91")
+	answer := collectHarnessAnswer(t, h.NewSession().Prompt(context.Background(), "use calculator to compute 13 * 7"))
+	if answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
 	}
 }
 
@@ -156,7 +126,7 @@ func TestNewReturnsErrorWhenProviderTypeUnknown(t *testing.T) {
 	}
 }
 
-func TestRunRejectsEmptyOrWhitespaceOnlyInput(t *testing.T) {
+func TestSessionPromptRejectsEmptyOrWhitespaceOnlyInput(t *testing.T) {
 	h := newFakeHarness(t)
 
 	tests := []struct {
@@ -170,84 +140,34 @@ func TestRunRejectsEmptyOrWhitespaceOnlyInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := h.Run(context.Background(), tt.input)
-			if err == nil {
-				t.Fatalf("Run(%q) error = nil, want empty input error", tt.input)
+			session := h.NewSession()
+			events := collectHarnessStreamEvents(t, session.Prompt(context.Background(), tt.input))
+			if len(events) != 1 {
+				t.Fatalf("Prompt(%q) events len = %d, want 1", tt.input, len(events))
 			}
-			if !strings.Contains(err.Error(), "empty input") {
-				t.Fatalf("Run(%q) error = %v, want empty input message", tt.input, err)
+			errEvent, ok := events[0].(ErrorEvent)
+			if !ok {
+				t.Fatalf("Prompt(%q) event = %T, want ErrorEvent", tt.input, events[0])
 			}
-		})
-	}
-}
-
-func TestRunTrimsSurroundingWhitespaceBeforePassingInputOnward(t *testing.T) {
-	h := newFakeHarness(t)
-
-	got, err := h.Run(context.Background(), "  use calculator to compute 13 * 7  ")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("Run() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("Run().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
-	}
-}
-
-func TestRunAgentMessagesRejectsEmptyFinalUserMessageAfterTrim(t *testing.T) {
-	h := newFakeHarness(t)
-
-	tests := []struct {
-		name     string
-		messages []agent.Message
-	}{
-		{
-			name: "whitespace only user",
-			messages: []agent.Message{
-				agent.UserMessage{Content: " \n\t "},
-			},
-		},
-		{
-			name: "history ending with whitespace user",
-			messages: []agent.Message{
-				agent.AssistantMessage{Content: "Need anything else?"},
-				agent.UserMessage{Content: "   \t"},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := h.RunAgentMessages(context.Background(), tt.messages)
-			if err == nil {
-				t.Fatal("RunAgentMessages() error = nil, want empty input error")
+			if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "empty input") {
+				t.Fatalf("Prompt(%q) error = %v, want empty input", tt.input, errEvent.Error)
 			}
-			if !strings.Contains(err.Error(), "empty input") {
-				t.Fatalf("RunAgentMessages() error = %v, want empty input message", err)
+			if messages := session.Messages(); len(messages) != 0 {
+				t.Fatalf("Messages() len = %d, want 0", len(messages))
 			}
 		})
 	}
 }
 
-func TestRunAgentMessagesContinuesHistoryEndingWithUserMessage(t *testing.T) {
+func TestSessionPromptTrimsSurroundingWhitespaceBeforePassingInputOnward(t *testing.T) {
 	h := newFakeHarness(t)
 
-	got, err := h.RunAgentMessages(context.Background(), []agent.Message{
-		agent.AssistantMessage{Content: "Let's continue from the earlier steps."},
-		agent.UserMessage{Content: "  use calculator to compute 13 * 7  "},
-	})
-	if err != nil {
-		t.Fatalf("RunAgentMessages() error = %v", err)
-	}
-	if got == nil {
-		t.Fatal("RunAgentMessages() result = nil")
-	}
-	if got.Answer != "13 * 7 = 91" {
-		t.Fatalf("RunAgentMessages().Answer = %q, want %q", got.Answer, "13 * 7 = 91")
+	answer := collectHarnessAnswer(t, h.NewSession().Prompt(context.Background(), "  use calculator to compute 13 * 7  "))
+	if answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
 	}
 }
+
 
 func newFakeHarness(t *testing.T) *Harness {
 	t.Helper()
@@ -269,6 +189,24 @@ func newFakeHarness(t *testing.T) *Harness {
 		t.Fatalf("New() error = %v", err)
 	}
 	return h
+}
+
+func collectHarnessAnswer(t *testing.T, stream <-chan Event) string {
+	t.Helper()
+	var answer string
+	for event := range stream {
+		switch event := event.(type) {
+		case MessageEndEvent:
+			if len(event.Message.ToolCalls) == 0 {
+				answer = event.Message.Content
+			}
+		case ErrorEvent:
+			if event.Error != nil {
+				t.Fatalf("stream error = %v", event.Error)
+			}
+		}
+	}
+	return answer
 }
 
 func writeProvidersConfig(t *testing.T, content string) string {
