@@ -72,7 +72,8 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			return
 		}
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
-		response, err := a.provider.Chat(ctx, llms.ChatRequest{
+		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
+		assistantMessage, lifecycleEmitted, err := a.runChatRound(ctx, emit, runID, messageID, llms.ChatRequest{
 			Model:    a.model,
 			Messages: llmMessages,
 			Tools:    toolSchemas,
@@ -91,14 +92,11 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			emitCancellation(stream, ErrorEvent{RunID: runID, Error: err})
 			return
 		}
-
-		assistantMessage := AssistantMessage{
-			Content:   response.Message.Content,
-			ToolCalls: append([]llms.ToolCall(nil), response.Message.ToolCalls...),
-		}
-		if _, err := toLLMMessage(assistantMessage); err != nil {
-			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("assistant response: %w", err)})
-			return
+		if !lifecycleEmitted {
+			if err := validateAssistantMessage(assistantMessage); err != nil {
+				emit(ErrorEvent{RunID: runID, Error: err})
+				return
+			}
 		}
 
 		if len(assistantMessage.ToolCalls) > 0 && chatRound >= a.maxSteps {
@@ -106,10 +104,10 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
 			return
 		}
-
-		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
-		if !emitAssistantLifecycle(emit, runID, messageID, assistantMessage) {
-			return
+		if !lifecycleEmitted {
+			if !emitAssistantLifecycle(emit, runID, messageID, assistantMessage) {
+				return
+			}
 		}
 
 		if len(assistantMessage.ToolCalls) == 0 {
@@ -142,6 +140,103 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			messages = append(messages, toolMessage)
 		}
 	}
+}
+
+func (a *Agent) runChatRound(ctx context.Context, emit func(Event) bool, runID string, messageID string, req llms.ChatRequest) (AssistantMessage, bool, error) {
+	if provider, ok := a.provider.(llms.StreamingProvider); ok {
+		assistantMessage, err := streamAssistantMessage(ctx, emit, provider, runID, messageID, req)
+		return assistantMessage, true, err
+	}
+
+	assistantMessage, err := a.chatAssistantMessage(ctx, req)
+	return assistantMessage, false, err
+}
+
+func (a *Agent) chatAssistantMessage(ctx context.Context, req llms.ChatRequest) (AssistantMessage, error) {
+	response, err := a.provider.Chat(ctx, req)
+	if err != nil {
+		return AssistantMessage{}, err
+	}
+	return assistantFromLLMMessage(response.Message), nil
+}
+
+func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider llms.StreamingProvider, runID string, messageID string, req llms.ChatRequest) (AssistantMessage, error) {
+	stream, err := provider.ChatStream(ctx, req)
+	if err != nil {
+		return AssistantMessage{}, err
+	}
+	if !emit(MessageStartEvent{RunID: runID, MessageID: messageID, Role: "assistant"}) {
+		return AssistantMessage{}, ctx.Err()
+	}
+
+	for {
+		select {
+		case event, ok := <-stream:
+			if !ok {
+				return AssistantMessage{}, fmt.Errorf("llm chat stream closed without done")
+			}
+			switch event.Type {
+			case llms.ChatStreamEventTypeDelta:
+				if !emitChatStreamDelta(emit, runID, messageID, event.Delta) {
+					return AssistantMessage{}, ctx.Err()
+				}
+			case llms.ChatStreamEventTypeDone:
+				assistantMessage := assistantFromLLMMessage(event.Message)
+				if err := validateAssistantMessage(assistantMessage); err != nil {
+					return AssistantMessage{}, err
+				}
+				if !emit(MessageEndEvent{RunID: runID, MessageID: messageID, Message: cloneAssistantMessage(assistantMessage)}) {
+					return AssistantMessage{}, ctx.Err()
+				}
+				return assistantMessage, nil
+			case llms.ChatStreamEventTypeError:
+				if event.Err == nil {
+					return AssistantMessage{}, fmt.Errorf("llm chat stream returned nil error")
+				}
+				return AssistantMessage{}, event.Err
+			default:
+				return AssistantMessage{}, fmt.Errorf("unknown llm chat stream event type %q", event.Type)
+			}
+		case <-ctx.Done():
+			return AssistantMessage{}, ctx.Err()
+		}
+	}
+}
+
+func emitChatStreamDelta(emit func(Event) bool, runID string, messageID string, delta llms.ChatStreamDelta) bool {
+	if delta.Content != "" {
+		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaText, ContentIndex: 0, Delta: delta.Content}) {
+			return false
+		}
+	}
+	if delta.ReasoningContent != "" {
+		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaThinking, ContentIndex: 0, Delta: delta.ReasoningContent}) {
+			return false
+		}
+	}
+	for _, call := range delta.ToolCalls {
+		if strings.TrimSpace(call.Function.Arguments) == "" {
+			continue
+		}
+		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaToolCall, ContentIndex: call.Index, Delta: call.Function.Arguments}) {
+			return false
+		}
+	}
+	return true
+}
+
+func assistantFromLLMMessage(message llms.Message) AssistantMessage {
+	return AssistantMessage{
+		Content:   message.Content,
+		ToolCalls: append([]llms.ToolCall(nil), message.ToolCalls...),
+	}
+}
+
+func validateAssistantMessage(message AssistantMessage) error {
+	if _, err := toLLMMessage(message); err != nil {
+		return fmt.Errorf("assistant response: %w", err)
+	}
+	return nil
 }
 
 func emitAssistantLifecycle(emit func(Event) bool, runID string, messageID string, message AssistantMessage) bool {
