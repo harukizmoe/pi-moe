@@ -143,4 +143,3 @@ type ErrorEvent struct {
 
 // AgentEvent 标记 ErrorEvent 为 Agent 运行事件。
 func (ErrorEvent) AgentEvent() {}
-
