@@ -50,14 +50,49 @@ func toLLMMessages(messages []Message) ([]llms.Message, error) {
 	}
 
 	out := make([]llms.Message, 0, len(messages))
+	var pendingToolCalls []llms.ToolCall
 	for i, message := range messages {
 		converted, err := toLLMMessage(message)
 		if err != nil {
 			return nil, fmt.Errorf("message %d: %w", i, err)
 		}
+		if err := validateToolResultOrder(i, converted, pendingToolCalls); err != nil {
+			return nil, err
+		}
+
+		switch converted.Role {
+		case llms.RoleAssistant:
+			pendingToolCalls = converted.ToolCalls
+		case llms.RoleTool:
+			pendingToolCalls = pendingToolCalls[1:]
+		}
 		out = append(out, converted)
 	}
+	if len(pendingToolCalls) > 0 {
+		return nil, fmt.Errorf("messages ended with missing tool result for pending assistant tool call %q", pendingToolCalls[0].ID)
+	}
 	return out, nil
+}
+
+func validateToolResultOrder(index int, message llms.Message, pendingToolCalls []llms.ToolCall) error {
+	switch message.Role {
+	case llms.RoleAssistant:
+		if len(pendingToolCalls) > 0 {
+			return fmt.Errorf("message %d: missing tool result for pending assistant tool call %q before assistant message", index, pendingToolCalls[0].ID)
+		}
+	case llms.RoleTool:
+		if len(pendingToolCalls) == 0 {
+			return fmt.Errorf("message %d: tool result %q has no pending assistant tool call", index, message.ToolCallID)
+		}
+		if message.ToolCallID != pendingToolCalls[0].ID {
+			return fmt.Errorf("message %d: tool result id mismatch: got %q, want pending assistant tool call %q", index, message.ToolCallID, pendingToolCalls[0].ID)
+		}
+	default:
+		if len(pendingToolCalls) > 0 {
+			return fmt.Errorf("message %d: missing tool result for pending assistant tool call %q before %s message", index, pendingToolCalls[0].ID, message.Role)
+		}
+	}
+	return nil
 }
 
 func toLLMMessage(message Message) (llms.Message, error) {
