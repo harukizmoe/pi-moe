@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -10,6 +11,15 @@ import (
 )
 
 var nextRunSequence atomic.Uint64
+
+type maxStepsExceededError struct {
+	maxSteps  int
+	toolCalls int
+}
+
+func (e maxStepsExceededError) Error() string {
+	return fmt.Sprintf("agent max steps exceeded after %d tool-calling rounds", e.maxSteps)
+}
 
 // Stream 从调用方提供的强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。
 func (a *Agent) Stream(ctx context.Context, messages []Message) <-chan Event {
@@ -73,12 +83,18 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 		}
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
-		assistantMessage, lifecycleEmitted, err := a.runChatRound(ctx, emit, runID, messageID, llms.ChatRequest{
+		assistantMessage, lifecycleEmitted, err := a.runChatRound(ctx, emit, runID, messageID, chatRound, llms.ChatRequest{
 			Model:    a.model,
 			Messages: llmMessages,
 			Tools:    toolSchemas,
 		})
 		if err != nil {
+			var maxStepsErr maxStepsExceededError
+			if errors.As(err, &maxStepsErr) {
+				a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", maxStepsErr.maxSteps, "tool_calls", maxStepsErr.toolCalls)
+				emit(ErrorEvent{RunID: runID, Error: maxStepsErr})
+				return
+			}
 			a.logLLMError(ctx, chatRound, err)
 			event := ErrorEvent{RunID: runID, Error: fmt.Errorf("llm chat round %d: %w", chatRound+1, err)}
 			if ctx.Err() != nil {
@@ -142,9 +158,9 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 	}
 }
 
-func (a *Agent) runChatRound(ctx context.Context, emit func(Event) bool, runID string, messageID string, req llms.ChatRequest) (AssistantMessage, bool, error) {
+func (a *Agent) runChatRound(ctx context.Context, emit func(Event) bool, runID string, messageID string, chatRound int, req llms.ChatRequest) (AssistantMessage, bool, error) {
 	if provider, ok := a.provider.(llms.StreamingProvider); ok {
-		assistantMessage, err := streamAssistantMessage(ctx, emit, provider, runID, messageID, req)
+		assistantMessage, err := streamAssistantMessage(ctx, emit, provider, runID, messageID, chatRound, a.maxSteps, req)
 		return assistantMessage, true, err
 	}
 
@@ -160,7 +176,7 @@ func (a *Agent) chatAssistantMessage(ctx context.Context, req llms.ChatRequest) 
 	return assistantFromLLMMessage(response.Message), nil
 }
 
-func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider llms.StreamingProvider, runID string, messageID string, req llms.ChatRequest) (AssistantMessage, error) {
+func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider llms.StreamingProvider, runID string, messageID string, chatRound int, maxSteps int, req llms.ChatRequest) (AssistantMessage, error) {
 	stream, err := provider.ChatStream(ctx, req)
 	if err != nil {
 		return AssistantMessage{}, err
@@ -184,6 +200,9 @@ func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider
 				assistantMessage := assistantFromLLMMessage(event.Message)
 				if err := validateAssistantMessage(assistantMessage); err != nil {
 					return AssistantMessage{}, err
+				}
+				if len(assistantMessage.ToolCalls) > 0 && chatRound >= maxSteps {
+					return AssistantMessage{}, maxStepsExceededError{maxSteps: maxSteps, toolCalls: len(assistantMessage.ToolCalls)}
 				}
 				if !emit(MessageEndEvent{RunID: runID, MessageID: messageID, Message: cloneAssistantMessage(assistantMessage)}) {
 					return AssistantMessage{}, ctx.Err()
@@ -215,7 +234,7 @@ func emitChatStreamDelta(emit func(Event) bool, runID string, messageID string, 
 		}
 	}
 	for _, call := range delta.ToolCalls {
-		if strings.TrimSpace(call.Function.Arguments) == "" {
+		if call.Function.Arguments == "" {
 			continue
 		}
 		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaToolCall, ContentIndex: call.Index, Delta: call.Function.Arguments}) {
