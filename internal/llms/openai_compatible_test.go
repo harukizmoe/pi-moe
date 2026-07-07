@@ -449,8 +449,10 @@ func TestOpenAICompatibleProviderChatStreamSendsStreamingPayloadAndParsesText(t 
 func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(t, w,
-			`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"calculator","arguments":"{\"a\":13"}}]}}]}`,
-			`{"choices":[{"delta":{"tool_calls":[{"index":0,"type":"function","function":{"arguments":",\"b\":7"}}]}}]}`,
+			`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_weather","function":{"name":"weather","arguments":"{\"city\":\"To"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_calc","function":{"name":"calculator","arguments":"{\"a\":13"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"kyo\",\"unit\":\"C\"}"}}]}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"b\":7"}}]}}]}`,
 			`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"op\":\"mul\"}"}}]}}]}`,
 			`{"choices":[{"finish_reason":"tool_calls"}]}`,
 			`[DONE]`,
@@ -470,13 +472,21 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 
 	events := collectChatStreamEvents(t, stream)
 
-	var aggregatedArguments string
+	deltaArgumentsByIndex := map[int]string{}
+	deltaIDsByIndex := map[int]string{}
+	deltaNamesByIndex := map[int]string{}
 	var done *ChatStreamEvent
 	for _, event := range events {
 		switch event.Type {
 		case ChatStreamEventTypeDelta:
 			for _, toolCall := range event.Delta.ToolCalls {
-				aggregatedArguments += toolCall.Function.Arguments
+				deltaArgumentsByIndex[toolCall.Index] += toolCall.Function.Arguments
+				if toolCall.ID != "" {
+					deltaIDsByIndex[toolCall.Index] = toolCall.ID
+				}
+				if toolCall.Function.Name != "" {
+					deltaNamesByIndex[toolCall.Index] = toolCall.Function.Name
+				}
 			}
 		case ChatStreamEventTypeDone:
 			eventCopy := event
@@ -486,27 +496,59 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 		}
 	}
 
-	if aggregatedArguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("tool call delta arguments = %q", aggregatedArguments)
+	if len(deltaArgumentsByIndex) != 2 {
+		t.Fatalf("delta tool call indexes = %#v", deltaArgumentsByIndex)
+	}
+	if deltaArgumentsByIndex[0] != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("tool call index 0 delta arguments = %q", deltaArgumentsByIndex[0])
+	}
+	if deltaArgumentsByIndex[1] != `{"city":"Tokyo","unit":"C"}` {
+		t.Fatalf("tool call index 1 delta arguments = %q", deltaArgumentsByIndex[1])
+	}
+	if deltaIDsByIndex[0] != "call_calc" {
+		t.Fatalf("tool call index 0 delta id = %q", deltaIDsByIndex[0])
+	}
+	if deltaIDsByIndex[1] != "call_weather" {
+		t.Fatalf("tool call index 1 delta id = %q", deltaIDsByIndex[1])
+	}
+	if deltaNamesByIndex[0] != "calculator" {
+		t.Fatalf("tool call index 0 delta name = %q", deltaNamesByIndex[0])
+	}
+	if deltaNamesByIndex[1] != "weather" {
+		t.Fatalf("tool call index 1 delta name = %q", deltaNamesByIndex[1])
 	}
 	if done == nil {
 		t.Fatal("missing done event")
 	}
-	if len(done.Message.ToolCalls) != 1 {
+	if done.Message.Role != RoleAssistant {
+		t.Fatalf("done role = %q", done.Message.Role)
+	}
+	if len(done.Message.ToolCalls) != 2 {
 		t.Fatalf("done tool calls len = %d", len(done.Message.ToolCalls))
 	}
-	toolCall := done.Message.ToolCalls[0]
-	if toolCall.ID != "call_1" {
-		t.Fatalf("tool call id = %q", toolCall.ID)
+	if done.Message.ToolCalls[0].ID != "call_calc" {
+		t.Fatalf("done tool call index 0 id = %q", done.Message.ToolCalls[0].ID)
 	}
-	if toolCall.Type != "function" {
-		t.Fatalf("tool call type = %q", toolCall.Type)
+	if done.Message.ToolCalls[0].Type != "function" {
+		t.Fatalf("done tool call index 0 type = %q", done.Message.ToolCalls[0].Type)
 	}
-	if toolCall.Function.Name != "calculator" {
-		t.Fatalf("tool call function name = %q", toolCall.Function.Name)
+	if done.Message.ToolCalls[0].Function.Name != "calculator" {
+		t.Fatalf("done tool call index 0 name = %q", done.Message.ToolCalls[0].Function.Name)
 	}
-	if toolCall.Function.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("tool call arguments = %q", toolCall.Function.Arguments)
+	if done.Message.ToolCalls[0].Function.Arguments != `{"a":13,"b":7,"op":"mul"}` {
+		t.Fatalf("done tool call index 0 arguments = %q", done.Message.ToolCalls[0].Function.Arguments)
+	}
+	if done.Message.ToolCalls[1].ID != "call_weather" {
+		t.Fatalf("done tool call index 1 id = %q", done.Message.ToolCalls[1].ID)
+	}
+	if done.Message.ToolCalls[1].Type != "function" {
+		t.Fatalf("done tool call index 1 type = %q", done.Message.ToolCalls[1].Type)
+	}
+	if done.Message.ToolCalls[1].Function.Name != "weather" {
+		t.Fatalf("done tool call index 1 name = %q", done.Message.ToolCalls[1].Function.Name)
+	}
+	if done.Message.ToolCalls[1].Function.Arguments != `{"city":"Tokyo","unit":"C"}` {
+		t.Fatalf("done tool call index 1 arguments = %q", done.Message.ToolCalls[1].Function.Arguments)
 	}
 }
 
