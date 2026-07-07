@@ -1,6 +1,7 @@
 package llms
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,6 +29,7 @@ type openAIChatRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Tools    []openAITool    `json:"tools,omitempty"`
+	Stream   bool            `json:"stream,omitempty"`
 }
 
 type openAIMessage struct {
@@ -69,6 +71,34 @@ type openAIChoice struct {
 	Message openAIMessage `json:"message"`
 }
 
+type openAIChatStreamResponse struct {
+	Choices []openAIChatStreamChoice `json:"choices"`
+	Error   *openAIStreamError       `json:"error"`
+}
+
+type openAIStreamError struct {
+	Message string `json:"message"`
+}
+
+type openAIChatStreamChoice struct {
+	Delta        openAIChatStreamDelta `json:"delta"`
+	FinishReason string                `json:"finish_reason"`
+}
+
+type openAIChatStreamDelta struct {
+	Role             string                    `json:"role"`
+	Content          string                    `json:"content"`
+	ReasoningContent string                    `json:"reasoning_content"`
+	ToolCalls        []openAIChatToolCallDelta `json:"tool_calls"`
+}
+
+type openAIChatToolCallDelta struct {
+	Index    int                    `json:"index"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function openAIToolCallFunction `json:"function"`
+}
+
 // NewOpenAICompatibleProvider 创建只负责协议适配的 OpenAI-compatible Provider。
 func NewOpenAICompatibleProvider(cfg ProviderConfig) (Provider, error) {
 	if cfg.BaseURL == "" {
@@ -90,10 +120,115 @@ func NewOpenAICompatibleProvider(cfg ProviderConfig) (Provider, error) {
 
 // Chat 发送一次 /chat/completions 请求，并把首个 choice 转回标准化 assistant 消息。
 func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	resp, err := p.doChatCompletions(ctx, req, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var decoded openAIChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode openai chat response: %w", err)
+	}
+	if len(decoded.Choices) == 0 {
+		return nil, fmt.Errorf("openai chat returned empty choices")
+	}
+
+	return &ChatResponse{Message: fromOpenAIMessage(decoded.Choices[0].Message)}, nil
+}
+
+// ChatStream 发送一次 /chat/completions streaming 请求，并把 SSE chunk 转回标准化事件。
+func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error) {
+	resp, err := p.doChatCompletions(ctx, req, true)
+	if err != nil {
+		return nil, err
+	}
+
+	events := make(chan ChatStreamEvent, 1)
+	go func() {
+		defer close(events)
+		defer resp.Body.Close()
+
+		reader := bufio.NewReader(resp.Body)
+		role := RoleAssistant
+		var content strings.Builder
+		var toolCalls []openAIToolCall
+		for {
+			if err := ctx.Err(); err != nil {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream context: %w", err)}
+				return
+			}
+
+			payload, err := readOpenAIStreamData(reader)
+			if err != nil {
+				if err == io.EOF {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream ended without done")}
+				} else {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("read openai chat stream: %w", err)}
+				}
+				return
+			}
+			if payload == "" {
+				continue
+			}
+			if payload == "[DONE]" {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
+				return
+			}
+
+			var decoded openAIChatStreamResponse
+			if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("unmarshal openai chat stream chunk: %w", err)}
+				return
+			}
+			if decoded.Error != nil {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: openAIStreamResponseError(decoded.Error)}
+				return
+			}
+			if len(decoded.Choices) == 0 {
+				continue
+			}
+
+			choice := decoded.Choices[0]
+			delta := ChatStreamDelta{}
+			if choice.Delta.Role != "" {
+				role = Role(choice.Delta.Role)
+				delta.Role = role
+			}
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				delta.Content = choice.Delta.Content
+			}
+			if choice.Delta.ReasoningContent != "" {
+				delta.ReasoningContent = choice.Delta.ReasoningContent
+			}
+			if len(choice.Delta.ToolCalls) > 0 {
+				toolCalls, err = mergeOpenAIStreamToolCalls(toolCalls, choice.Delta.ToolCalls, &delta)
+				if err != nil {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: err}
+					return
+				}
+			}
+
+			if delta.Content != "" || delta.ReasoningContent != "" || len(delta.ToolCalls) > 0 {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeDelta, Delta: delta}
+			}
+			if choice.FinishReason != "" {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
+				return
+			}
+		}
+	}()
+
+	return events, nil
+}
+
+func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req ChatRequest, stream bool) (*http.Response, error) {
 	payload, err := json.Marshal(openAIChatRequest{
 		Model:    firstNonEmpty(req.Model, p.model),
 		Messages: toOpenAIMessages(req.Messages),
 		Tools:    toOpenAITools(req.Tools),
+		Stream:   stream,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal openai chat request: %w", err)
@@ -112,30 +247,135 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("send openai chat request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	// Provider 只验证协议边界；非 2xx 保留有限响应体，便于定位上游错误但避免无限读取。
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOpenAIErrorBodyBytes))
-		if readErr != nil {
-			return nil, fmt.Errorf("openai chat returned status %d and failed to read error body: %w", resp.StatusCode, readErr)
-		}
-		bodyText := strings.TrimSpace(string(body))
-		if bodyText == "" {
-			return nil, fmt.Errorf("openai chat returned status %d", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
+		err := openAIStatusError(resp)
+		resp.Body.Close()
+		return nil, err
 	}
 
-	var decoded openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("decode openai chat response: %w", err)
+	return resp, nil
+}
+
+func openAIStatusError(resp *http.Response) error {
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOpenAIErrorBodyBytes))
+	if readErr != nil {
+		return fmt.Errorf("openai chat returned status %d and failed to read error body: %w", resp.StatusCode, readErr)
 	}
-	if len(decoded.Choices) == 0 {
-		return nil, fmt.Errorf("openai chat returned empty choices")
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return fmt.Errorf("openai chat returned status %d", resp.StatusCode)
+	}
+	return fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
+}
+
+func openAIStreamResponseError(streamErr *openAIStreamError) error {
+	message := strings.TrimSpace(streamErr.Message)
+	if message == "" {
+		return fmt.Errorf("openai chat stream returned error")
+	}
+	return fmt.Errorf("openai chat stream returned error: %s", message)
+}
+
+func readOpenAIStreamData(reader *bufio.Reader) (string, error) {
+	var dataLines []string
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r")
+
+		switch {
+		case line == "":
+			if len(dataLines) > 0 {
+				return strings.Join(dataLines, "\n"), nil
+			}
+		case strings.HasPrefix(line, ":"):
+		case strings.HasPrefix(line, "data:"):
+			data := strings.TrimPrefix(line, "data:")
+			dataLines = append(dataLines, strings.TrimPrefix(data, " "))
+		}
+
+		if err == io.EOF {
+			if len(dataLines) == 0 {
+				return "", io.EOF
+			}
+			return strings.Join(dataLines, "\n"), nil
+		}
+	}
+}
+
+func mergeOpenAIStreamToolCalls(toolCalls []openAIToolCall, deltas []openAIChatToolCallDelta, eventDelta *ChatStreamDelta) ([]openAIToolCall, error) {
+	if len(deltas) == 0 {
+		return toolCalls, nil
+	}
+	if eventDelta.ToolCalls == nil {
+		eventDelta.ToolCalls = make([]ToolCallDelta, 0, len(deltas))
 	}
 
-	return &ChatResponse{Message: fromOpenAIMessage(decoded.Choices[0].Message)}, nil
+	for _, delta := range deltas {
+		if delta.Index < 0 {
+			return nil, fmt.Errorf("decode openai chat stream chunk: negative tool call index %d", delta.Index)
+		}
+		for len(toolCalls) <= delta.Index {
+			toolCalls = append(toolCalls, openAIToolCall{})
+		}
+
+		toolCall := &toolCalls[delta.Index]
+		if delta.ID != "" {
+			toolCall.ID = delta.ID
+		}
+		if delta.Type != "" {
+			toolCall.Type = delta.Type
+		}
+		if delta.Function.Name != "" {
+			toolCall.Function.Name = delta.Function.Name
+		}
+		if delta.Function.Arguments != "" {
+			toolCall.Function.Arguments += delta.Function.Arguments
+		}
+
+		eventDelta.ToolCalls = append(eventDelta.ToolCalls, ToolCallDelta{
+			Index: delta.Index,
+			ID:    delta.ID,
+			Type:  delta.Type,
+			Function: ToolCallFunctionDelta{
+				Name:      delta.Function.Name,
+				Arguments: delta.Function.Arguments,
+			},
+		})
+	}
+
+	return toolCalls, nil
+}
+
+func openAIStreamMessage(role Role, content string, toolCalls []openAIToolCall) Message {
+	if role == "" {
+		role = RoleAssistant
+	}
+	return Message{
+		Role:      role,
+		Content:   content,
+		ToolCalls: openAIStreamToolCalls(toolCalls),
+	}
+}
+
+func openAIStreamToolCalls(toolCalls []openAIToolCall) []ToolCall {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	compact := make([]openAIToolCall, 0, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		if toolCall.ID == "" && toolCall.Type == "" && toolCall.Function.Name == "" && toolCall.Function.Arguments == "" {
+			continue
+		}
+		compact = append(compact, toolCall)
+	}
+	return fromOpenAIToolCalls(compact)
 }
 
 func toOpenAIMessages(messages []Message) []openAIMessage {

@@ -11,6 +11,13 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }
 
+// StreamingProvider 表示支持增量返回 assistant 消息的 Provider。
+type StreamingProvider interface {
+	Provider
+	// ChatStream 发送一次标准化聊天请求，并返回 provider-neutral streaming 事件。
+	ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error)
+}
+
 // Factory 根据一个 Provider 实例配置创建 Provider。
 type Factory func(cfg ProviderConfig) (Provider, error)
 
