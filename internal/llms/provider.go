@@ -5,15 +5,8 @@ import (
 	"fmt"
 )
 
-// Provider 是所有 LLM 后端必须实现的最小接口。
+// Provider 是所有 LLM 后端必须实现的流式接口。
 type Provider interface {
-	// Chat 发送一次标准化聊天请求，并返回一条标准化 assistant 消息。
-	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
-}
-
-// StreamingProvider 表示支持增量返回 assistant 消息的 Provider。
-type StreamingProvider interface {
-	Provider
 	// ChatStream 发送一次标准化聊天请求，并返回 provider-neutral streaming 事件。
 	ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error)
 }

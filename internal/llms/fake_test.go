@@ -11,11 +11,11 @@ func TestFakeProviderReturnsToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatalf("NewFakeProvider() error = %v", err)
 	}
 
-	first, err := provider.Chat(context.Background(), ChatRequest{
+	first, err := CollectChat(context.Background(), provider, ChatRequest{
 		Messages: []Message{{Role: "user", Content: "calculate 13 * 7"}},
 	})
 	if err != nil {
-		t.Fatalf("first Chat() error = %v", err)
+		t.Fatalf("first CollectChat() error = %v", err)
 	}
 	if len(first.Message.ToolCalls) != 1 {
 		t.Fatalf("tool calls len = %d", len(first.Message.ToolCalls))
@@ -24,7 +24,7 @@ func TestFakeProviderReturnsToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatalf("tool name = %q", first.Message.ToolCalls[0].Function.Name)
 	}
 
-	second, err := provider.Chat(context.Background(), ChatRequest{
+	second, err := CollectChat(context.Background(), provider, ChatRequest{
 		Messages: []Message{
 			{Role: "user", Content: "calculate 13 * 7"},
 			first.Message,
@@ -32,7 +32,7 @@ func TestFakeProviderReturnsToolCallThenFinalAnswer(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("second Chat() error = %v", err)
+		t.Fatalf("second CollectChat() error = %v", err)
 	}
 	if second.Message.Content != "13 * 7 = 91" {
 		t.Fatalf("final content = %q", second.Message.Content)
@@ -45,9 +45,7 @@ func TestFakeProviderChatStreamReturnsToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatalf("NewFakeProvider() error = %v", err)
 	}
 
-	streamingProvider := requireStreamingProvider(t, provider)
-
-	firstStream, err := streamingProvider.ChatStream(context.Background(), ChatRequest{
+	firstStream, err := provider.ChatStream(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "calculate 13 * 7"}},
 	})
 	if err != nil {
@@ -87,7 +85,7 @@ func TestFakeProviderChatStreamReturnsToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatalf("first-round tool call delta arguments = %q", firstToolArguments)
 	}
 
-	secondStream, err := streamingProvider.ChatStream(context.Background(), ChatRequest{
+	secondStream, err := provider.ChatStream(context.Background(), ChatRequest{
 		Messages: []Message{
 			{Role: RoleUser, Content: "calculate 13 * 7"},
 			firstDone.Message,

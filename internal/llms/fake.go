@@ -12,18 +12,17 @@ func NewFakeProvider(cfg ProviderConfig) (Provider, error) {
 	return &FakeProvider{model: cfg.Model}, nil
 }
 
-// Chat 第一次返回固定 calculator tool call，随后把最近的 tool result 转成最终回答。
-func (p *FakeProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+func (p *FakeProvider) fakeChatMessage(req ChatRequest) Message {
 	// 如果 agent 已经执行过工具，则用该工具结果结束 fake 对话。
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		msg := req.Messages[i]
 		if msg.Role == RoleTool {
-			return &ChatResponse{Message: Message{Role: RoleAssistant, Content: "13 * 7 = " + msg.Content}}, nil
+			return Message{Role: RoleAssistant, Content: "13 * 7 = " + msg.Content}
 		}
 	}
 
 	// 否则请求 calculator 工具，并使用稳定参数保证测试确定性。
-	return &ChatResponse{Message: Message{
+	return Message{
 		Role: RoleAssistant,
 		ToolCalls: []ToolCall{{
 			ID:   "call_fake_calculator",
@@ -33,40 +32,37 @@ func (p *FakeProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse
 				Arguments: `{"a":13,"b":7,"op":"mul"}`,
 			},
 		}},
-	}}, nil
+	}
 }
 
-// ChatStream 复用 Chat 的确定性结果，并以 provider-neutral streaming 事件返回。
+// ChatStream 返回确定性的 fake provider-neutral streaming 事件。
 func (p *FakeProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return fakeStreamError(err), nil
 	}
 
-	resp, err := p.Chat(ctx, req)
-	if err != nil {
-		return nil, err
-	}
+	message := p.fakeChatMessage(req)
 	if err := ctx.Err(); err != nil {
 		return fakeStreamError(err), nil
 	}
 
 	events := make(chan ChatStreamEvent, 3)
-	if resp.Message.Content != "" {
+	if message.Content != "" {
 		events <- ChatStreamEvent{
 			Type: ChatStreamEventTypeDelta,
 			Delta: ChatStreamDelta{
-				Role:    resp.Message.Role,
-				Content: resp.Message.Content,
+				Role:    message.Role,
+				Content: message.Content,
 			},
 		}
 	}
-	if len(resp.Message.ToolCalls) > 0 {
+	if len(message.ToolCalls) > 0 {
 		events <- ChatStreamEvent{
 			Type:  ChatStreamEventTypeDelta,
-			Delta: fakeToolCallDelta(resp.Message),
+			Delta: fakeToolCallDelta(message),
 		}
 	}
-	events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: resp.Message}
+	events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: message}
 	close(events)
 	return events, nil
 }

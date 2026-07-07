@@ -10,11 +10,11 @@ import (
 )
 
 func TestAgentStreamEmitsNoToolMessageLifecycle(t *testing.T) {
-	provider := chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "done without tools",
-		}}, nil
+	provider := streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return streamEvents(
+			assistantTextDelta("done without tools"),
+			assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "done without tools"}),
+		), nil
 	})
 	a := New(provider, tools.NewRegistry(), "fake-model")
 

@@ -83,7 +83,7 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 		}
 		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
 		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
-		assistantMessage, lifecycleEmitted, err := a.runChatRound(ctx, emit, runID, messageID, chatRound, llms.ChatRequest{
+		assistantMessage, err := a.runChatRound(ctx, emit, runID, messageID, chatRound, llms.ChatRequest{
 			Model:    a.model,
 			Messages: llmMessages,
 			Tools:    toolSchemas,
@@ -108,22 +108,11 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 			emitCancellation(stream, ErrorEvent{RunID: runID, Error: err})
 			return
 		}
-		if !lifecycleEmitted {
-			if err := validateAssistantMessage(assistantMessage); err != nil {
-				emit(ErrorEvent{RunID: runID, Error: err})
-				return
-			}
-		}
 
 		if len(assistantMessage.ToolCalls) > 0 && chatRound >= a.maxSteps {
 			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
 			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
 			return
-		}
-		if !lifecycleEmitted {
-			if !emitAssistantLifecycle(emit, runID, messageID, assistantMessage) {
-				return
-			}
 		}
 
 		if len(assistantMessage.ToolCalls) == 0 {
@@ -158,25 +147,11 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 	}
 }
 
-func (a *Agent) runChatRound(ctx context.Context, emit func(Event) bool, runID string, messageID string, chatRound int, req llms.ChatRequest) (AssistantMessage, bool, error) {
-	if provider, ok := a.provider.(llms.StreamingProvider); ok {
-		assistantMessage, err := streamAssistantMessage(ctx, emit, provider, runID, messageID, chatRound, a.maxSteps, req)
-		return assistantMessage, true, err
-	}
-
-	assistantMessage, err := a.chatAssistantMessage(ctx, req)
-	return assistantMessage, false, err
+func (a *Agent) runChatRound(ctx context.Context, emit func(Event) bool, runID string, messageID string, chatRound int, req llms.ChatRequest) (AssistantMessage, error) {
+	return streamAssistantMessage(ctx, emit, a.provider, runID, messageID, chatRound, a.maxSteps, req)
 }
 
-func (a *Agent) chatAssistantMessage(ctx context.Context, req llms.ChatRequest) (AssistantMessage, error) {
-	response, err := a.provider.Chat(ctx, req)
-	if err != nil {
-		return AssistantMessage{}, err
-	}
-	return assistantFromLLMMessage(response.Message), nil
-}
-
-func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider llms.StreamingProvider, runID string, messageID string, chatRound int, maxSteps int, req llms.ChatRequest) (AssistantMessage, error) {
+func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider llms.Provider, runID string, messageID string, chatRound int, maxSteps int, req llms.ChatRequest) (AssistantMessage, error) {
 	stream, err := provider.ChatStream(ctx, req)
 	if err != nil {
 		return AssistantMessage{}, err
@@ -256,26 +231,6 @@ func validateAssistantMessage(message AssistantMessage) error {
 		return fmt.Errorf("assistant response: %w", err)
 	}
 	return nil
-}
-
-func emitAssistantLifecycle(emit func(Event) bool, runID string, messageID string, message AssistantMessage) bool {
-	if !emit(MessageStartEvent{RunID: runID, MessageID: messageID, Role: "assistant"}) {
-		return false
-	}
-	if strings.TrimSpace(message.Content) != "" {
-		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaText, ContentIndex: 0, Delta: message.Content}) {
-			return false
-		}
-	}
-	for i, call := range message.ToolCalls {
-		if strings.TrimSpace(call.Function.Arguments) == "" {
-			continue
-		}
-		if !emit(MessageDeltaEvent{RunID: runID, MessageID: messageID, Kind: MessageDeltaToolCall, ContentIndex: i, Delta: call.Function.Arguments}) {
-			return false
-		}
-	}
-	return emit(MessageEndEvent{RunID: runID, MessageID: messageID, Message: cloneAssistantMessage(message)})
 }
 
 func countUserMessages(messages []Message) int {

@@ -17,7 +17,7 @@ type recordingProvider struct {
 	requests []llms.ChatRequest
 }
 
-func (p *recordingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+func (p *recordingProvider) ChatStream(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 	messages := make([]llms.Message, len(req.Messages))
 	for i, msg := range req.Messages {
 		toolCalls := append([]llms.ToolCall(nil), msg.ToolCalls...)
@@ -36,13 +36,33 @@ func (p *recordingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*ll
 	}
 	p.requests = append(p.requests, copied)
 
-	return p.inner.Chat(ctx, req)
+	return p.inner.ChatStream(ctx, req)
 }
 
-type chatFunc func(context.Context, llms.ChatRequest) (*llms.ChatResponse, error)
+type streamFunc func(context.Context, llms.ChatRequest) (<-chan llms.ChatStreamEvent, error)
 
-func (f chatFunc) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+func (f streamFunc) ChatStream(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 	return f(ctx, req)
+}
+
+func assistantTextDelta(content string) llms.ChatStreamEvent {
+	return llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, Content: content}}
+}
+
+func assistantToolCallDelta(index int, call llms.ToolCall) llms.ChatStreamEvent {
+	return llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCallDelta{{
+		Index: index,
+		ID:    call.ID,
+		Type:  call.Type,
+		Function: llms.ToolCallFunctionDelta{
+			Name:      call.Function.Name,
+			Arguments: call.Function.Arguments,
+		},
+	}}}}
+}
+
+func assistantDone(message llms.Message) llms.ChatStreamEvent {
+	return llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: message}
 }
 
 func streamAgentText(a *Agent, ctx context.Context, input string) <-chan Event {
@@ -236,24 +256,26 @@ func TestAgentRunDefaultAllowsSecondRoundToolCall(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:      llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{calculatorToolCall("call_first_round", `{"a":13,"b":7,"op":"mul"}`)},
-			}}, nil
+			call := calculatorToolCall("call_first_round", `{"a":13,"b":7,"op":"mul"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:      llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{calculatorToolCall("call_second_round", `{"a":1,"b":2,"op":"add"}`)},
-			}}, nil
+			call := calculatorToolCall("call_second_round", `{"a":1,"b":2,"op":"add"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 3:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "second round completed",
-			}}, nil
+			return streamEvents(
+				assistantTextDelta("second round completed"),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "second round completed"}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -286,34 +308,32 @@ func TestAgentRunSupportsMultipleToolRoundsWithinMaxSteps(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
 			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
 				t.Fatalf("second request last message = %#v, want tool result 5", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 3:
 			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "20" {
 				t.Fatalf("third request last message = %#v, want tool result 20", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "final answer: 20",
-			}}, nil
+			return streamEvents(
+				assistantTextDelta("final answer: 20"),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "final answer: 20"}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -335,26 +355,24 @@ func TestAgentRunReturnsMaxStepsErrorWhenToolLoopExceedsLimit(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
 			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
 				t.Fatalf("second request last message = %#v, want tool result 5", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -392,11 +410,11 @@ func collectStreamEvents(t *testing.T, stream <-chan Event) []Event {
 }
 
 func TestAgentStreamReturnsAnswerWithoutToolCalls(t *testing.T) {
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "done without tools",
-		}}, nil
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return streamEvents(
+			assistantTextDelta("done without tools"),
+			assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "done without tools"}),
+		), nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
@@ -432,19 +450,22 @@ func TestAgentStreamWithProvidedHistoryEmitsToolRoundEvents(t *testing.T) {
 	toolResult := llms.Message{Role: llms.RoleTool, Content: "80", ToolCallID: "call_history_mul"}
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
 			assertMessagesEqual(t, req.Messages, wantHistory)
-			return &llms.ChatResponse{Message: assistantToolCall}, nil
+			return streamEvents(
+				assistantToolCallDelta(0, assistantToolCall.ToolCalls[0]),
+				assistantDone(assistantToolCall),
+			), nil
 		case 2:
 			want := append(append([]llms.Message{}, wantHistory...), assistantToolCall, toolResult)
 			assertMessagesEqual(t, req.Messages, want)
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "16 * 5 = 80",
-			}}, nil
+			return streamEvents(
+				assistantTextDelta("16 * 5 = 80"),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "16 * 5 = 80"}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -521,8 +542,8 @@ func TestAgentStreamWithProvidedHistoryEmitsToolRoundEvents(t *testing.T) {
 }
 
 func TestAgentStreamWrapsProviderErrorWithChatRoundContext(t *testing.T) {
-	sentinel := errors.New("provider chat failed")
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	sentinel := errors.New("provider chat stream failed")
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		return nil, sentinel
 	})}
 
@@ -552,12 +573,12 @@ func TestAgentStreamReturnsContextCancellationWhenCanceledAfterChat(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		cancel()
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "answer dropped by cancellation",
-		}}, nil
+		return streamEvents(
+			assistantTextDelta("answer dropped by cancellation"),
+			assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "answer dropped by cancellation"}),
+		), nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
@@ -584,8 +605,8 @@ func TestAgentStreamReturnsCancellationErrorWhenContextAlreadyCanceledWithValidM
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		t.Fatal("provider.Chat() should not be called for canceled context")
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		t.Fatal("provider.ChatStream() should not be called for canceled context")
 		return nil, nil
 	})}
 
@@ -609,8 +630,8 @@ func TestAgentStreamClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvali
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		t.Fatal("provider.Chat() should not be called for invalid history")
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		t.Fatal("provider.ChatStream() should not be called for invalid history")
 		return nil, nil
 	})}
 
@@ -634,20 +655,20 @@ func TestAgentStreamClosesWithoutEventWhenContextAlreadyCanceledAndHistoryInvali
 }
 
 func TestAgentStreamRejectsEmptyAssistantResponse(t *testing.T) {
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{Role: llms.RoleAssistant}}, nil
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return streamEvents(assistantDone(llms.Message{Role: llms.RoleAssistant})), nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
 	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{
 		UserMessage{Content: "answer directly"},
 	}))
-	if len(events) != 3 {
-		t.Fatalf("events len = %d, want 3", len(events))
+	if len(events) != 4 {
+		t.Fatalf("events len = %d, want 4", len(events))
 	}
-	errEvent, ok := events[2].(ErrorEvent)
+	errEvent, ok := events[3].(ErrorEvent)
 	if !ok {
-		t.Fatalf("event[2] type = %T, want ErrorEvent", events[2])
+		t.Fatalf("event[3] type = %T, want ErrorEvent", events[3])
 	}
 	if !strings.Contains(errEvent.Error.Error(), "assistant message must have content or tool calls") {
 		t.Fatalf("stream error = %q, want assistant validation", errEvent.Error.Error())
@@ -662,34 +683,32 @@ func TestAgentStreamEmitsToolExecutionEventsAcrossRounds(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
 			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "5" {
 				t.Fatalf("second request last message = %#v, want tool result 5", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 3:
 			if got := req.Messages[len(req.Messages)-1]; got.Role != llms.RoleTool || got.Content != "20" {
 				t.Fatalf("third request last message = %#v, want tool result 20", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "final answer: 20",
-			}}, nil
+			return streamEvents(
+				assistantTextDelta("final answer: 20"),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "final answer: 20"}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -760,16 +779,15 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_bad_args", `{"a":1`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_bad_args", `{"a":1`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
 			got := req.Messages[len(req.Messages)-1]
 			if got.Role != llms.RoleTool {
@@ -784,10 +802,10 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 			if !strings.Contains(got.Content, "decode calculator arguments") {
 				t.Fatalf("second request tool content = %q, want calculator decode context", got.Content)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role:    llms.RoleAssistant,
-				Content: "I couldn't use calculator because the arguments were malformed.",
-			}}, nil
+			return streamEvents(
+				assistantTextDelta("I couldn't use calculator because the arguments were malformed."),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "I couldn't use calculator because the arguments were malformed."}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -848,27 +866,25 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 	registry.Register(tools.Calculator{})
 
 	round := 0
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		round++
 		switch round {
 		case 1:
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_bad_args", `{"a":1`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_bad_args", `{"a":1`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		case 2:
 			got := req.Messages[len(req.Messages)-1]
 			if got.Role != llms.RoleTool || !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
 				t.Fatalf("second request last message = %#v, want sanitized tool failure", got)
 			}
-			return &llms.ChatResponse{Message: llms.Message{
-				Role: llms.RoleAssistant,
-				ToolCalls: []llms.ToolCall{
-					calculatorToolCall("call_retry", `{"a":1`),
-				},
-			}}, nil
+			call := calculatorToolCall("call_retry", `{"a":1`)
+			return streamEvents(
+				assistantToolCallDelta(0, call),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
+			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
 			return nil, nil
@@ -888,6 +904,8 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 		MessageEndEvent{},
 		ToolExecutionStartEvent{},
 		ToolExecutionEndEvent{},
+		MessageStartEvent{},
+		MessageDeltaEvent{},
 		ErrorEvent{},
 	)
 	if len(provider.requests) != 2 {
@@ -902,7 +920,7 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
 	}
 
-	errEvent := events[7].(ErrorEvent)
+	errEvent := events[9].(ErrorEvent)
 	if !strings.Contains(errEvent.Error.Error(), "max steps") {
 		t.Fatalf("stream error = %v, want max steps message", errEvent.Error)
 	}
@@ -929,12 +947,12 @@ func TestAgentStreamForwardsSemanticHistoryToProvider(t *testing.T) {
 		{Role: llms.RoleUser, Content: "multiply that by 3"},
 	}
 
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 		assertMessagesEqual(t, req.Messages, want)
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "4 * 3 = 12",
-		}}, nil
+		return streamEvents(
+			assistantTextDelta("4 * 3 = 12"),
+			assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "4 * 3 = 12"}),
+		), nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")
@@ -980,8 +998,8 @@ func TestAgentStreamRejectsInvalidHistoryAndSemanticMessages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-				t.Fatal("provider.Chat() should not be called for invalid semantic history")
+			provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+				t.Fatal("provider.ChatStream() should not be called for invalid semantic history")
 				return nil, nil
 			})}
 
@@ -1016,11 +1034,11 @@ func TestAgentStreamForwardsProvidedHistoryToProvider(t *testing.T) {
 		{Role: llms.RoleUser, Content: "multiply that by 3"},
 	}
 
-	provider := &recordingProvider{inner: chatFunc(func(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-		return &llms.ChatResponse{Message: llms.Message{
-			Role:    llms.RoleAssistant,
-			Content: "4 * 3 = 12",
-		}}, nil
+	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return streamEvents(
+			assistantTextDelta("4 * 3 = 12"),
+			assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "4 * 3 = 12"}),
+		), nil
 	})}
 
 	a := New(provider, tools.NewRegistry(), "fake-tool-model")

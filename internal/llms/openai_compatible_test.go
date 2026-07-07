@@ -3,7 +3,6 @@ package llms
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +37,7 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 	}
 	type capturedRequest struct {
 		Model    string            `json:"model"`
+		Stream   bool              `json:"stream"`
 		Messages []capturedMessage `json:"messages"`
 		Tools    []capturedTool    `json:"tools,omitempty"`
 	}
@@ -61,27 +61,12 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-  "choices": [
-    {
-      "message": {
-        "role": "assistant",
-        "content": "calling calculator",
-        "tool_calls": [
-          {
-            "id": "call_1",
-            "type": "function",
-            "function": {
-              "name": "calculator",
-              "arguments": "{\"a\":13,\"b\":7,\"op\":\"mul\"}"
-            }
-          }
-        ]
-      }
-    }
-  ]
-}`))
+		writeSSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			`{"choices":[{"delta":{"content":"calling calculator"}}]}`,
+			`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"calculator","arguments":"{\"a\":13,\"b\":7,\"op\":\"mul\"}"}}]}}]}`,
+			`{"choices":[{"finish_reason":"tool_calls"}]}`,
+		)
 	}))
 	defer server.Close()
 
@@ -95,7 +80,7 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	resp, err := provider.Chat(context.Background(), ChatRequest{
+	resp, err := CollectChat(context.Background(), provider, ChatRequest{
 		Messages: []Message{
 			{Role: RoleSystem, Content: "You are a calculator."},
 			{Role: RoleUser, Content: "calculate"},
@@ -127,9 +112,12 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
+		t.Fatalf("CollectChat() error = %v", err)
 	}
 
+	if !captured.Stream {
+		t.Fatal("stream = false")
+	}
 	if captured.Model != "test-model" {
 		t.Fatalf("model = %q", captured.Model)
 	}
@@ -179,8 +167,10 @@ func TestOpenAICompatibleProviderPreservesEmptyToolContent(t *testing.T) {
 		}
 		payload = string(body)
 
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		writeSSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant","content":"ok"}}]}`,
+			`[DONE]`,
+		)
 	}))
 	defer server.Close()
 
@@ -189,11 +179,11 @@ func TestOpenAICompatibleProviderPreservesEmptyToolContent(t *testing.T) {
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	_, err = provider.Chat(context.Background(), ChatRequest{
+	_, err = CollectChat(context.Background(), provider, ChatRequest{
 		Messages: []Message{{Role: RoleTool, ToolCallID: "call_empty", Content: ""}},
 	})
 	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
+		t.Fatalf("CollectChat() error = %v", err)
 	}
 
 	if !strings.Contains(payload, `"role":"tool"`) {
@@ -220,9 +210,9 @@ func TestOpenAICompatibleProviderStatusErrorIncludesBodyExcerpt(t *testing.T) {
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	_, err = provider.Chat(context.Background(), ChatRequest{})
+	_, err = CollectChat(context.Background(), provider, ChatRequest{})
 	if err == nil {
-		t.Fatal("Chat() error = nil")
+		t.Fatal("CollectChat() error = nil")
 	}
 	if !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error missing status: %v", err)
@@ -232,52 +222,12 @@ func TestOpenAICompatibleProviderStatusErrorIncludesBodyExcerpt(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleProviderReturnsDecodeErrorOnMalformedJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":]}`))
-	}))
-	defer server.Close()
-
-	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
-	if err != nil {
-		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
-	}
-
-	_, err = provider.Chat(context.Background(), ChatRequest{})
-	if err == nil {
-		t.Fatal("Chat() error = nil")
-	}
-	if !strings.Contains(err.Error(), "decode openai chat response") {
-		t.Fatalf("error missing decode context: %v", err)
-	}
-	var syntaxErr *json.SyntaxError
-	if !errors.As(err, &syntaxErr) {
-		t.Fatalf("error missing wrapped syntax error: %v", err)
-	}
-}
-
 func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"choices": [
-				{
-					"message": {
-						"role": "assistant",
-						"tool_calls": [
-							{
-								"id": "call_1",
-								"function": {
-									"name": "calculator",
-									"arguments": "{\"a\":13,\"b\":7,\"op\":\"mul\"}"
-								}
-							}
-						]
-					}
-				}
-			]
-		}`))
+		writeSSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"calculator","arguments":"{\"a\":13,\"b\":7,\"op\":\"mul\"}"}}]}}]}`,
+			`{"choices":[{"finish_reason":"tool_calls"}]}`,
+		)
 	}))
 	defer server.Close()
 
@@ -286,9 +236,9 @@ func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *test
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	resp, err := provider.Chat(context.Background(), ChatRequest{})
+	resp, err := CollectChat(context.Background(), provider, ChatRequest{})
 	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
+		t.Fatalf("CollectChat() error = %v", err)
 	}
 	if len(resp.Message.ToolCalls) != 1 {
 		t.Fatalf("tool calls len = %d", len(resp.Message.ToolCalls))
@@ -307,27 +257,6 @@ func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *test
 	}
 	if resp.Message.Role != RoleAssistant {
 		t.Fatalf("response role = %q", resp.Message.Role)
-	}
-}
-
-func TestOpenAICompatibleProviderReturnsErrorOnEmptyChoices(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
-	}))
-	defer server.Close()
-
-	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
-	if err != nil {
-		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
-	}
-
-	_, err = provider.Chat(context.Background(), ChatRequest{})
-	if err == nil {
-		t.Fatal("Chat() error = nil")
-	}
-	if !strings.Contains(err.Error(), "empty choices") {
-		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -381,7 +310,7 @@ func TestOpenAICompatibleProviderChatStreamSendsStreamingPayloadAndParsesText(t 
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{
+	stream, err := provider.ChatStream(context.Background(), ChatRequest{
 		Messages: []Message{
 			{Role: RoleSystem, Content: "You are a calculator."},
 			{Role: RoleUser, Content: "say hello"},
@@ -465,7 +394,7 @@ func TestOpenAICompatibleProviderChatStreamIgnoresUsageOnlyChunks(t *testing.T) 
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+	stream, err := provider.ChatStream(context.Background(), ChatRequest{})
 	if err != nil {
 		t.Fatalf("ChatStream() error = %v", err)
 	}
@@ -526,7 +455,7 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+	stream, err := provider.ChatStream(context.Background(), ChatRequest{})
 	if err != nil {
 		t.Fatalf("ChatStream() error = %v", err)
 	}
@@ -728,7 +657,7 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 			}
 
-			stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+			stream, err := provider.ChatStream(context.Background(), ChatRequest{})
 			var events []ChatStreamEvent
 			if err == nil {
 				events = collectChatStreamEvents(t, stream)
@@ -764,7 +693,7 @@ func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone
 				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 			}
 
-			stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+			stream, err := provider.ChatStream(context.Background(), ChatRequest{})
 			if err != nil {
 				t.Fatalf("ChatStream() error = %v", err)
 			}
@@ -810,7 +739,7 @@ func TestOpenAICompatibleProviderChatStreamCompletesOnFinishReasonWithoutDone(t 
 		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 	}
 
-	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+	stream, err := provider.ChatStream(context.Background(), ChatRequest{})
 	if err != nil {
 		t.Fatalf("ChatStream() error = %v", err)
 	}
@@ -845,17 +774,6 @@ func TestOpenAICompatibleProviderChatStreamCompletesOnFinishReasonWithoutDone(t 
 	if done.Message.Content != "partial" {
 		t.Fatalf("done content = %q, want partial", done.Message.Content)
 	}
-}
-
-func requireStreamingProvider(t *testing.T, provider Provider) StreamingProvider {
-	t.Helper()
-
-	streamingProvider, ok := provider.(StreamingProvider)
-	if !ok {
-		t.Fatal("provider does not implement StreamingProvider")
-	}
-
-	return streamingProvider
 }
 
 func collectChatStreamEvents(t *testing.T, stream <-chan ChatStreamEvent) []ChatStreamEvent {

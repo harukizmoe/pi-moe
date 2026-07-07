@@ -374,33 +374,58 @@ func writeProvidersConfig(t *testing.T, content string) string {
 	return path
 }
 
+func sessionChatStream(message llms.Message) <-chan llms.ChatStreamEvent {
+	events := make([]llms.ChatStreamEvent, 0, len(message.ToolCalls)+2)
+	if message.Content != "" {
+		events = append(events, llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: message.Role, Content: message.Content}})
+	}
+	for i, call := range message.ToolCalls {
+		events = append(events, llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: message.Role, ToolCalls: []llms.ToolCallDelta{{
+			Index: i,
+			ID:    call.ID,
+			Type:  call.Type,
+			Function: llms.ToolCallFunctionDelta{
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			},
+		}}}})
+	}
+	events = append(events, llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: message})
+	stream := make(chan llms.ChatStreamEvent, len(events))
+	for _, event := range events {
+		stream <- event
+	}
+	close(stream)
+	return stream
+}
+
 type maxStepLoopProvider struct {
 	t     *testing.T
 	round int
 }
 
-func (p *maxStepLoopProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+func (p *maxStepLoopProvider) ChatStream(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 	p.t.Helper()
 	p.round++
 	switch p.round {
 	case 1:
-		return &llms.ChatResponse{Message: llms.Message{
+		return sessionChatStream(llms.Message{
 			Role: llms.RoleAssistant,
 			ToolCalls: []llms.ToolCall{
 				maxStepCalculatorToolCall("call_step_1", `{"a":2,"b":3,"op":"add"}`),
 			},
-		}}, nil
+		}), nil
 	case 2:
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role != llms.RoleTool || last.Content != "5" {
 			p.t.Fatalf("second request last message = %#v, want tool result 5", last)
 		}
-		return &llms.ChatResponse{Message: llms.Message{
+		return sessionChatStream(llms.Message{
 			Role: llms.RoleAssistant,
 			ToolCalls: []llms.ToolCall{
 				maxStepCalculatorToolCall("call_step_2", `{"a":5,"b":4,"op":"mul"}`),
 			},
-		}}, nil
+		}), nil
 	default:
 		p.t.Fatalf("unexpected chat round = %d", p.round)
 		return nil, nil
@@ -430,7 +455,7 @@ func newBlockingProvider() *blockingProvider {
 	}
 }
 
-func (p *blockingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
+func (p *blockingProvider) ChatStream(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 	select {
 	case <-p.started:
 	default:
@@ -438,7 +463,7 @@ func (p *blockingProvider) Chat(ctx context.Context, req llms.ChatRequest) (*llm
 	}
 	select {
 	case <-p.release:
-		return &llms.ChatResponse{Message: llms.Message{Role: llms.RoleAssistant, Content: "first done"}}, nil
+		return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "first done"}), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

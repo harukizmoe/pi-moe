@@ -11,21 +11,10 @@ import (
 )
 
 type streamingProviderStub struct {
-	chatFunc   func(context.Context, llms.ChatRequest) (*llms.ChatResponse, error)
 	streamFunc func(context.Context, llms.ChatRequest) (<-chan llms.ChatStreamEvent, error)
 
-	chatCalls   int
 	streamCalls int
 	requests    []llms.ChatRequest
-}
-
-func (p *streamingProviderStub) Chat(ctx context.Context, req llms.ChatRequest) (*llms.ChatResponse, error) {
-	p.chatCalls++
-	p.requests = append(p.requests, cloneChatRequest(req))
-	if p.chatFunc != nil {
-		return p.chatFunc(ctx, req)
-	}
-	return nil, errors.New("unexpected Chat fallback")
 }
 
 func (p *streamingProviderStub) ChatStream(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
@@ -56,7 +45,7 @@ func streamEvents(events ...llms.ChatStreamEvent) <-chan llms.ChatStreamEvent {
 	return stream
 }
 
-func TestAgentStreamUsesStreamingProviderWhenAvailable(t *testing.T) {
+func TestAgentStreamUsesChatStream(t *testing.T) {
 	provider := &streamingProviderStub{
 		streamFunc: func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
 			return streamEvents(
@@ -83,9 +72,6 @@ func TestAgentStreamUsesStreamingProviderWhenAvailable(t *testing.T) {
 
 	if provider.streamCalls != 1 {
 		t.Fatalf("stream calls = %d, want 1", provider.streamCalls)
-	}
-	if provider.chatCalls != 0 {
-		t.Fatalf("chat calls = %d, want 0", provider.chatCalls)
 	}
 	if len(provider.requests) != 1 {
 		t.Fatalf("requests len = %d, want 1", len(provider.requests))
@@ -167,9 +153,6 @@ func TestAgentStreamStreamingToolCallsContinueWithToolResult(t *testing.T) {
 	if provider.streamCalls != 2 {
 		t.Fatalf("stream calls = %d, want 2", provider.streamCalls)
 	}
-	if provider.chatCalls != 0 {
-		t.Fatalf("chat calls = %d, want 0", provider.chatCalls)
-	}
 	if len(provider.requests) != 2 {
 		t.Fatalf("requests len = %d, want 2", len(provider.requests))
 	}
@@ -221,7 +204,7 @@ func TestAgentStreamStreamingToolCallsContinueWithToolResult(t *testing.T) {
 	}
 }
 
-func TestAgentStreamReturnsStreamingProviderErrorWithoutChatFallback(t *testing.T) {
+func TestAgentStreamReturnsChatStreamError(t *testing.T) {
 	tests := []struct {
 		name        string
 		synchronous bool
@@ -247,9 +230,6 @@ func TestAgentStreamReturnsStreamingProviderErrorWithoutChatFallback(t *testing.
 
 			if provider.streamCalls != 1 {
 				t.Fatalf("stream calls = %d, want 1", provider.streamCalls)
-			}
-			if provider.chatCalls != 0 {
-				t.Fatalf("chat calls = %d, want 0", provider.chatCalls)
 			}
 			if len(provider.requests) != 1 {
 				t.Fatalf("requests len = %d, want 1", len(provider.requests))
@@ -280,7 +260,7 @@ func TestAgentStreamReturnsStreamingProviderErrorWithoutChatFallback(t *testing.
 	}
 }
 
-func TestAgentStreamStreamingProviderMaxStepsOverLimitDoesNotEmitMessageEndEvent(t *testing.T) {
+func TestAgentStreamMaxStepsOverLimitDoesNotEmitMessageEndEvent(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 

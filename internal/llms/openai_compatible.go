@@ -63,14 +63,6 @@ type openAIToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
-type openAIChatResponse struct {
-	Choices []openAIChoice `json:"choices"`
-}
-
-type openAIChoice struct {
-	Message openAIMessage `json:"message"`
-}
-
 type openAIChatStreamResponse struct {
 	Choices []openAIChatStreamChoice `json:"choices"`
 	Error   *openAIStreamError       `json:"error"`
@@ -118,28 +110,9 @@ func NewOpenAICompatibleProvider(cfg ProviderConfig) (Provider, error) {
 	}, nil
 }
 
-// Chat 发送一次 /chat/completions 请求，并把首个 choice 转回标准化 assistant 消息。
-func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	resp, err := p.doChatCompletions(ctx, req, false)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var decoded openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return nil, fmt.Errorf("decode openai chat response: %w", err)
-	}
-	if len(decoded.Choices) == 0 {
-		return nil, fmt.Errorf("openai chat returned empty choices")
-	}
-
-	return &ChatResponse{Message: fromOpenAIMessage(decoded.Choices[0].Message)}, nil
-}
-
 // ChatStream 发送一次 /chat/completions streaming 请求，并把 SSE chunk 转回标准化事件。
 func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error) {
-	resp, err := p.doChatCompletions(ctx, req, true)
+	resp, err := p.doChatCompletions(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -223,12 +196,12 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 	return events, nil
 }
 
-func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req ChatRequest, stream bool) (*http.Response, error) {
+func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req ChatRequest) (*http.Response, error) {
 	payload, err := json.Marshal(openAIChatRequest{
 		Model:    firstNonEmpty(req.Model, p.model),
 		Messages: toOpenAIMessages(req.Messages),
 		Tools:    toOpenAITools(req.Tools),
-		Stream:   stream,
+		Stream:   true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal openai chat request: %w", err)

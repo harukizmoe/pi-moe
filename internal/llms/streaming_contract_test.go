@@ -8,15 +8,11 @@ import (
 
 type streamingProviderStub struct{}
 
-func (streamingProviderStub) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	return nil, nil
-}
-
 func (streamingProviderStub) ChatStream(ctx context.Context, req ChatRequest) (<-chan ChatStreamEvent, error) {
 	return nil, nil
 }
 
-var _ StreamingProvider = streamingProviderStub{}
+var _ Provider = streamingProviderStub{}
 
 func TestStreamingContract(t *testing.T) {
 	t.Run("delta event carries incremental assistant state", func(t *testing.T) {
