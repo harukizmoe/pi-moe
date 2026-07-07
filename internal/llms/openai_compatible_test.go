@@ -168,6 +168,7 @@ func TestOpenAICompatibleProviderSendsChatCompletionPayload(t *testing.T) {
 		t.Fatalf("tool name = %q", resp.Message.ToolCalls[0].Function.Name)
 	}
 }
+
 func TestOpenAICompatibleProviderPreservesEmptyToolContent(t *testing.T) {
 	var payload string
 
@@ -446,6 +447,66 @@ func TestOpenAICompatibleProviderChatStreamSendsStreamingPayloadAndParsesText(t 
 	}
 }
 
+func TestOpenAICompatibleProviderChatStreamIgnoresUsageOnlyChunks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			`{"choices":[{"delta":{"content":"hel"}}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+			`{"choices":[{"delta":{"content":"lo"}}]}`,
+			`{"choices":[{"finish_reason":"stop"}]}`,
+			`[DONE]`,
+		)
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+
+	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	events := collectChatStreamEvents(t, stream)
+
+	var deltas []string
+	var done *ChatStreamEvent
+	for _, event := range events {
+		switch event.Type {
+		case ChatStreamEventTypeDelta:
+			if event.Delta.Content != "" {
+				deltas = append(deltas, event.Delta.Content)
+			}
+		case ChatStreamEventTypeDone:
+			if done != nil {
+				t.Fatalf("multiple done events: %#v", events)
+			}
+			eventCopy := event
+			done = &eventCopy
+		case ChatStreamEventTypeError:
+			t.Fatalf("unexpected error event: %v", event.Err)
+		default:
+			t.Fatalf("unexpected event type = %q", event.Type)
+		}
+	}
+
+	if len(deltas) != 2 || deltas[0] != "hel" || deltas[1] != "lo" {
+		t.Fatalf("content deltas = %#v", deltas)
+	}
+	if done == nil {
+		t.Fatal("missing done event")
+	}
+	if done.Message.Role != RoleAssistant {
+		t.Fatalf("done role = %q", done.Message.Role)
+	}
+	if done.Message.Content != "hello" {
+		t.Fatalf("done content = %q", done.Message.Content)
+	}
+}
+
 func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(t, w,
@@ -554,9 +615,9 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 
 func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamErrors(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		handler http.HandlerFunc
-		assert func(t *testing.T, err error, events []ChatStreamEvent)
+		assert  func(t *testing.T, err error, events []ChatStreamEvent)
 	}{
 		{
 			name: "status_error",
@@ -616,6 +677,45 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				}
 			},
 		},
+		{
+			name: "error_frame",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(t, w, `{"error":{"message":"quota exhausted"}}`)
+			},
+			assert: func(t *testing.T, err error, events []ChatStreamEvent) {
+				t.Helper()
+				if err != nil {
+					t.Fatalf("ChatStream() error = %v", err)
+				}
+
+				var errorText string
+				var sawDone bool
+				for _, event := range events {
+					switch event.Type {
+					case ChatStreamEventTypeDone:
+						sawDone = true
+					case ChatStreamEventTypeError:
+						if event.Err == nil {
+							t.Fatal("error event err = nil")
+						}
+						errorText = event.Err.Error()
+					}
+				}
+
+				if errorText == "" {
+					t.Fatalf("events missing error event: %#v", events)
+				}
+				if !strings.Contains(errorText, "openai chat stream") {
+					t.Fatalf("error missing openai chat stream context: %q", errorText)
+				}
+				if !strings.Contains(errorText, "quota exhausted") {
+					t.Fatalf("error missing quota message: %q", errorText)
+				}
+				if sawDone {
+					t.Fatalf("unexpected done event: %#v", events)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -640,42 +740,65 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 }
 
 func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSSE(t, w, `{"choices":[{"delta":{"content":"partial"}}]}`)
-	}))
-	defer server.Close()
-
-	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
-	if err != nil {
-		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	tests := []struct {
+		name     string
+		payloads []string
+	}{
+		{
+			name: "after_non_terminal_chunk",
+			payloads: []string{
+				`{"choices":[{"delta":{"content":"partial"}}]}`,
+			},
+		},
+		{
+			name: "after_finish_reason_before_done",
+			payloads: []string{
+				`{"choices":[{"delta":{"content":"partial"}}]}`,
+				`{"choices":[{"finish_reason":"stop"}]}`,
+			},
+		},
 	}
 
-	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
-	if err != nil {
-		t.Fatalf("ChatStream() error = %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(t, w, tt.payloads...)
+			}))
+			defer server.Close()
 
-	events := collectChatStreamEvents(t, stream)
-
-	var sawDone bool
-	var errorText string
-	for _, event := range events {
-		switch event.Type {
-		case ChatStreamEventTypeDone:
-			sawDone = true
-		case ChatStreamEventTypeError:
-			if event.Err == nil {
-				t.Fatal("error event err = nil")
+			provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
 			}
-			errorText = event.Err.Error()
-		}
-	}
 
-	if sawDone {
-		t.Fatalf("unexpected done event: %#v", events)
-	}
-	if !strings.Contains(errorText, "ended without done") {
-		t.Fatalf("error missing ended without done: %#v", events)
+			stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+			if err != nil {
+				t.Fatalf("ChatStream() error = %v", err)
+			}
+
+			events := collectChatStreamEvents(t, stream)
+
+			var sawDone bool
+			var errorText string
+			for _, event := range events {
+				switch event.Type {
+				case ChatStreamEventTypeDone:
+					sawDone = true
+				case ChatStreamEventTypeError:
+					if event.Err == nil {
+						t.Fatal("error event err = nil")
+					}
+					errorText = event.Err.Error()
+				}
+			}
+
+			if sawDone {
+				t.Fatalf("unexpected done event: %#v", events)
+			}
+			if !strings.Contains(errorText, "ended without done") {
+				t.Fatalf("error missing ended without done: %#v", events)
+			}
+		})
 	}
 }
 

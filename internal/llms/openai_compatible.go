@@ -70,8 +70,14 @@ type openAIChatResponse struct {
 type openAIChoice struct {
 	Message openAIMessage `json:"message"`
 }
+
 type openAIChatStreamResponse struct {
 	Choices []openAIChatStreamChoice `json:"choices"`
+	Error   *openAIStreamError       `json:"error"`
+}
+
+type openAIStreamError struct {
+	Message string `json:"message"`
 }
 
 type openAIChatStreamChoice struct {
@@ -144,10 +150,15 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 		defer resp.Body.Close()
 
 		reader := bufio.NewReader(resp.Body)
+		role := RoleAssistant
 		var content strings.Builder
 		var toolCalls []openAIToolCall
-
 		for {
+			if err := ctx.Err(); err != nil {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream context: %w", err)}
+				return
+			}
+
 			payload, err := readOpenAIStreamData(reader)
 			if err != nil {
 				if err == io.EOF {
@@ -161,7 +172,7 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				continue
 			}
 			if payload == "[DONE]" {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(content.String(), toolCalls)}
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
 				return
 			}
 
@@ -170,15 +181,19 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("unmarshal openai chat stream chunk: %w", err)}
 				return
 			}
-			if len(decoded.Choices) == 0 {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("decode openai chat stream chunk: empty choices")}
+			if decoded.Error != nil {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: openAIStreamResponseError(decoded.Error)}
 				return
+			}
+			if len(decoded.Choices) == 0 {
+				continue
 			}
 
 			choice := decoded.Choices[0]
 			delta := ChatStreamDelta{}
 			if choice.Delta.Role != "" {
-				delta.Role = Role(choice.Delta.Role)
+				role = Role(choice.Delta.Role)
+				delta.Role = role
 			}
 			if choice.Delta.Content != "" {
 				content.WriteString(choice.Delta.Content)
@@ -197,10 +212,6 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 
 			if delta.Content != "" || delta.ReasoningContent != "" || len(delta.ToolCalls) > 0 {
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDelta, Delta: delta}
-			}
-			if choice.FinishReason != "" {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(content.String(), toolCalls)}
-				return
 			}
 		}
 	}()
@@ -251,6 +262,14 @@ func openAIStatusError(resp *http.Response) error {
 		return fmt.Errorf("openai chat returned status %d", resp.StatusCode)
 	}
 	return fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
+}
+
+func openAIStreamResponseError(streamErr *openAIStreamError) error {
+	message := strings.TrimSpace(streamErr.Message)
+	if message == "" {
+		return fmt.Errorf("openai chat stream returned error")
+	}
+	return fmt.Errorf("openai chat stream returned error: %s", message)
 }
 
 func readOpenAIStreamData(reader *bufio.Reader) (string, error) {
@@ -329,9 +348,12 @@ func mergeOpenAIStreamToolCalls(toolCalls []openAIToolCall, deltas []openAIChatT
 	return toolCalls, nil
 }
 
-func openAIStreamMessage(content string, toolCalls []openAIToolCall) Message {
+func openAIStreamMessage(role Role, content string, toolCalls []openAIToolCall) Message {
+	if role == "" {
+		role = RoleAssistant
+	}
 	return Message{
-		Role:      RoleAssistant,
+		Role:      role,
 		Content:   content,
 		ToolCalls: openAIStreamToolCalls(toolCalls),
 	}
