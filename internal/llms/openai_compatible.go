@@ -213,6 +213,10 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 			if delta.Content != "" || delta.ReasoningContent != "" || len(delta.ToolCalls) > 0 {
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDelta, Delta: delta}
 			}
+			if choice.FinishReason != "" {
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
+				return
+			}
 		}
 	}()
 

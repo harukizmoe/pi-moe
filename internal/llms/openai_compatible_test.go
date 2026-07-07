@@ -750,13 +750,6 @@ func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone
 				`{"choices":[{"delta":{"content":"partial"}}]}`,
 			},
 		},
-		{
-			name: "after_finish_reason_before_done",
-			payloads: []string{
-				`{"choices":[{"delta":{"content":"partial"}}]}`,
-				`{"choices":[{"finish_reason":"stop"}]}`,
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -799,6 +792,58 @@ func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone
 				t.Fatalf("error missing ended without done: %#v", events)
 			}
 		})
+	}
+}
+
+func TestOpenAICompatibleProviderChatStreamCompletesOnFinishReasonWithoutDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			`{"choices":[{"delta":{"content":"partial"}}]}`,
+			`{"choices":[{"finish_reason":"stop"}]}`,
+		)
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+	}
+
+	stream, err := requireStreamingProvider(t, provider).ChatStream(context.Background(), ChatRequest{})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	events := collectChatStreamEvents(t, stream)
+
+	var deltas []string
+	var done *ChatStreamEvent
+	for _, event := range events {
+		switch event.Type {
+		case ChatStreamEventTypeDelta:
+			if event.Delta.Content != "" {
+				deltas = append(deltas, event.Delta.Content)
+			}
+		case ChatStreamEventTypeDone:
+			eventCopy := event
+			done = &eventCopy
+		case ChatStreamEventTypeError:
+			t.Fatalf("unexpected error event: %v", event.Err)
+		}
+	}
+
+	if len(deltas) != 1 || deltas[0] != "partial" {
+		t.Fatalf("content deltas = %#v", deltas)
+	}
+	if done == nil {
+		t.Fatalf("missing done event: %#v", events)
+	}
+	if done.Message.Role != RoleAssistant {
+		t.Fatalf("done role = %q, want %q", done.Message.Role, RoleAssistant)
+	}
+	if done.Message.Content != "partial" {
+		t.Fatalf("done content = %q, want partial", done.Message.Content)
 	}
 }
 
