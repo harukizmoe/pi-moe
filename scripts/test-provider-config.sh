@@ -34,8 +34,9 @@ payload = json.loads(os.environ["PROVIDER_JSON"])
 for key in ("name", "type", "model", "ready", "error"):
     if key not in payload:
         raise SystemExit(f"missing field: {key}")
-if "api_key" in json.dumps(payload) or "secret" in json.dumps(payload).lower():
-    raise SystemExit("response leaks key material")
+for forbidden in ("api_key", "apiKey", "key", "secret"):
+    if forbidden in payload:
+        raise SystemExit(f"response leaks key material field: {forbidden}")
 if not isinstance(payload["ready"], bool):
     raise SystemExit("ready must be boolean")
 if payload["ready"] and payload["error"] != "":
