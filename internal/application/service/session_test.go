@@ -79,8 +79,12 @@ func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+	first, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	if err != nil {
 		t.Fatalf("first Run() error = %v", err)
+	}
+	if first.Answer != "13 * 7 = 91" {
+		t.Fatalf("first Run() Answer = %q, want 13 * 7 = 91", first.Answer)
 	}
 	second, err := svc.Run(ctx, created.ID, "what was the previous result?")
 	if err != nil {
@@ -93,15 +97,7 @@ func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if len(detail.Messages) != 6 {
-		t.Fatalf("detail Messages len = %d, want 6: %#v", len(detail.Messages), detail.Messages)
-	}
-	if detail.Messages[4].Role != "user" || detail.Messages[4].Content != "what was the previous result?" {
-		t.Fatalf("second user message = %#v", detail.Messages[4])
-	}
-	if detail.Messages[5].Role != "assistant" || detail.Messages[5].Content != "previous result was 91" {
-		t.Fatalf("second assistant message = %#v", detail.Messages[5])
-	}
+	assertServiceResumedTranscript(t, detail.Messages)
 }
 
 func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
@@ -449,6 +445,42 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsUnknownProviderType(t *t
 	}
 	if got != want {
 		t.Fatalf("CurrentProviderDiagnostics() = %#v, want %#v", got, want)
+	}
+}
+
+func assertServiceResumedTranscript(t *testing.T, messages []appservice.SessionMessage) {
+	t.Helper()
+	if len(messages) != 6 {
+		t.Fatalf("detail Messages len = %d, want 6: %#v", len(messages), messages)
+	}
+	user := messages[0]
+	if user.Role != "user" || user.Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("first user message = %#v, want calculator prompt", user)
+	}
+	assistantToolCall := messages[1]
+	if assistantToolCall.Role != "assistant" || len(assistantToolCall.ToolCalls) != 1 {
+		t.Fatalf("first assistant tool call message = %#v, want one calculator tool call", assistantToolCall)
+	}
+	call := assistantToolCall.ToolCalls[0]
+	if call.ID != "call_fake_calculator" || call.Tool != "calculator" {
+		t.Fatalf("first tool call = %#v, want calculator call", call)
+	}
+	assertJSONEqual(t, call.Arguments, `{"a":13,"b":7,"op":"mul"}`)
+	toolResult := messages[2]
+	if toolResult.Role != "tool" || toolResult.ToolCallID != call.ID || toolResult.Tool != "calculator" || toolResult.Content != "91" {
+		t.Fatalf("first tool result message = %#v, want calculator result 91 for call %q", toolResult, call.ID)
+	}
+	firstAssistant := messages[3]
+	if firstAssistant.Role != "assistant" || firstAssistant.Content != "13 * 7 = 91" || len(firstAssistant.ToolCalls) != 0 {
+		t.Fatalf("first final assistant message = %#v, want final calculator answer", firstAssistant)
+	}
+	secondUser := messages[4]
+	if secondUser.Role != "user" || secondUser.Content != "what was the previous result?" {
+		t.Fatalf("second user message = %#v, want previous-result prompt", secondUser)
+	}
+	secondAssistant := messages[5]
+	if secondAssistant.Role != "assistant" || secondAssistant.Content != "previous result was 91" || len(secondAssistant.ToolCalls) != 0 {
+		t.Fatalf("second assistant message = %#v, want previous-result answer", secondAssistant)
 	}
 }
 

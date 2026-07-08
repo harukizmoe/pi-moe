@@ -132,6 +132,8 @@ func TestRouterReturnsSessionDetailWithStableMessageHistory(t *testing.T) {
 func TestRouterRunsAppendToExistingSessionTranscript(t *testing.T) {
 	handler := newTestRouter(t)
 	created := createSession(t, handler, "resume calculator")
+	// 保证后续 Touch 的 wall-clock 时间跨过 Create 时间,避免 timestamp 断言依赖纳秒级调度。
+	time.Sleep(time.Millisecond)
 
 	first := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{"input": "use calculator to compute 13 * 7"})
 	assertStatus(t, first, http.StatusOK)
@@ -154,14 +156,23 @@ func TestRouterRunsAppendToExistingSessionTranscript(t *testing.T) {
 	if len(detail.Messages) != 6 {
 		t.Fatalf("detail messages len = %d, want 6: %#v", len(detail.Messages), detail.Messages)
 	}
+	assertCalculatorTranscript(t, detail.Messages[:4])
 	if detail.Messages[4].Role != "user" || detail.Messages[4].Content != "what was the previous result?" {
 		t.Fatalf("second user message = %#v", detail.Messages[4])
 	}
 	if detail.Messages[5].Role != "assistant" || detail.Messages[5].Content != "previous result was 91" {
 		t.Fatalf("second assistant message = %#v", detail.Messages[5])
 	}
-	if detail.UpdatedAt == created.UpdatedAt {
-		t.Fatalf("updated_at did not change after resumed runs: %q", detail.UpdatedAt)
+	createdUpdated, err := time.Parse(time.RFC3339Nano, created.UpdatedAt)
+	if err != nil {
+		t.Fatalf("created updated_at = %q, want RFC3339Nano: %v", created.UpdatedAt, err)
+	}
+	detailUpdated, err := time.Parse(time.RFC3339Nano, detail.UpdatedAt)
+	if err != nil {
+		t.Fatalf("detail updated_at = %q, want RFC3339Nano: %v", detail.UpdatedAt, err)
+	}
+	if !detailUpdated.After(createdUpdated) {
+		t.Fatalf("updated_at = %s, want after %s", detail.UpdatedAt, created.UpdatedAt)
 	}
 }
 
