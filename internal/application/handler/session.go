@@ -119,7 +119,7 @@ func (h *SessionHandler) Stream(ctx *gin.Context) {
 	}
 	events, err := h.service.Stream(ctx.Request.Context(), ctx.Param("id"), req.Input)
 	if err != nil {
-		writeError(ctx, http.StatusInternalServerError, err.Error())
+		writeStreamError(ctx, err.Error())
 		return
 	}
 
@@ -137,6 +137,14 @@ func (h *SessionHandler) Stream(ctx *gin.Context) {
 		ctx.SSEvent(event.Name, event.Data)
 		flusher.Flush()
 	}
+}
+
+func writeStreamError(ctx *gin.Context, message string) {
+	ctx.Header("Content-Type", "text/event-stream")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Connection", "keep-alive")
+	ctx.Status(http.StatusOK)
+	ctx.SSEvent("error", gin.H{"error": message})
 }
 
 func newSessionResponse(meta appservice.SessionMeta) sessionResponse {

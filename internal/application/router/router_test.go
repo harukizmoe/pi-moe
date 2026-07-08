@@ -103,6 +103,30 @@ func TestRouterStreamsSessionRunAsSSE(t *testing.T) {
 	}
 }
 
+func TestRouterStreamsValidationErrorsAsSSE(t *testing.T) {
+	handler := newTestRouter(t)
+	created := createSession(t, handler, "stream validation")
+
+	response := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs/stream", map[string]string{
+		"input": "",
+	})
+
+	assertStatus(t, response, http.StatusOK)
+	contentType := response.Header().Get("Content-Type")
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	body := response.Body.String()
+	for _, want := range []string{
+		"event:error",
+		`data:{"error":"input must not be empty"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("SSE body missing %q in:\n%s", want, body)
+		}
+	}
+}
+
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
