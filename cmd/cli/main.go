@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
@@ -17,9 +18,23 @@ import (
 const (
 	agentLogPath                 = ".moe/logs/agent.log"
 	defaultCLIProviderConfigPath = "configs/providers.yaml"
+	defaultCLISessionRoot        = ".moe/sessions"
 )
 
 func main() {
+	ctx := context.Background()
+	opts, err := parseCLIOptions(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if opts.listSessions {
+		if err := runListSessions(ctx, os.Stdout, defaultCLISessionRoot); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	appLogger, closeLogger, err := logger.NewDevelopmentFile(agentLogPath)
 	if err != nil {
 		log.Fatal(err)
@@ -30,18 +45,15 @@ func main() {
 		}
 	}()
 
-	opts, err := parseCLIOptions(os.Args[1:])
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	runner, err := newCLISession(context.Background(), opts, appLogger)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	if opts.interactive {
-		if err := runInteractive(context.Background(), runner, os.Stdin, os.Stdout, opts.includeTrace); err != nil {
+		runner, managed, err := newCLISessionWithRoot(ctx, opts, appLogger, defaultCLISessionRoot, "interactive session")
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := runInteractive(ctx, runner, os.Stdin, os.Stdout, opts.includeTrace); err != nil {
+			log.Fatal(err)
+		}
+		if err := touchManagedSession(ctx, managed); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -52,8 +64,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	output, err := collectRunOutput(runner.Prompt(context.Background(), input))
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, appLogger, defaultCLISessionRoot, input)
 	if err != nil {
+		log.Fatal(err)
+	}
+
+	output, err := collectRunOutput(runner.Prompt(ctx, input))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
 		log.Fatal(err)
 	}
 
@@ -67,6 +87,12 @@ type cliOptions struct {
 	providerName string
 	// sessionPath 非空时启用 JSONL 会话恢复，空值保持一次性内存会话。
 	sessionPath string
+	// newSession 表示创建 manager-managed session 并用本轮 prompt 作为标题来源。
+	newSession bool
+	// resumeSessionID 是从 manager index 恢复的 session id。
+	resumeSessionID string
+	// listSessions 表示只列出 manager-managed sessions，不创建 Agent 或读取 Provider。
+	listSessions bool
 	// includeTrace 控制 CLI 是否输出 tool call 调试轨迹。
 	includeTrace bool
 	// promptArgs 保存 flag 解析后的剩余参数，会被拼接为本轮用户输入。
@@ -84,25 +110,97 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.StringVar(&opts.sessionPath, "session", "", "session JSONL path")
 	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
 	flags.BoolVar(&opts.interactive, "interactive", false, "read prompts line by line until quit or EOF")
+	flags.BoolVar(&opts.newSession, "new-session", false, "create a managed session")
+	flags.StringVar(&opts.resumeSessionID, "resume", "", "managed session id to resume")
+	flags.BoolVar(&opts.listSessions, "list-sessions", false, "list managed sessions")
 
 	if err := flags.Parse(args); err != nil {
 		return cliOptions{}, fmt.Errorf("parse flags: %w", err)
 	}
 	opts.promptArgs = flags.Args()
+	if err := validateCLIOptions(opts); err != nil {
+		return cliOptions{}, err
+	}
 	return opts, nil
 }
 
-// newCLISession 根据 --session 决定使用内存 Session 还是 JSONL-backed Session。
+func validateCLIOptions(opts cliOptions) error {
+	hasManualSession := strings.TrimSpace(opts.sessionPath) != ""
+	hasResume := strings.TrimSpace(opts.resumeSessionID) != ""
+
+	if hasManualSession && opts.newSession {
+		return fmt.Errorf("--session and --new-session are mutually exclusive")
+	}
+	if hasManualSession && hasResume {
+		return fmt.Errorf("--session and --resume are mutually exclusive")
+	}
+	if opts.newSession && hasResume {
+		return fmt.Errorf("--new-session and --resume are mutually exclusive")
+	}
+	if opts.listSessions {
+		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume {
+			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, or --resume")
+		}
+	}
+	return nil
+}
+
+type cliManagedSession struct {
+	manager *session.Manager
+	ID      string
+}
+
+// newCLISession 根据 session 选项创建内存、显式 JSONL 或 manager-managed Session。
 func newCLISession(ctx context.Context, opts cliOptions, appLogger logger.Logger) (*session.Session, error) {
+	runner, _, err := newCLISessionWithRoot(ctx, opts, appLogger, defaultCLISessionRoot, strings.Join(opts.promptArgs, " "))
+	return runner, err
+}
+
+func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logger.Logger, sessionRoot string, title string) (*session.Session, *cliManagedSession, error) {
 	cfg := session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		Logger:             appLogger,
 	}
-	if strings.TrimSpace(opts.sessionPath) == "" {
-		return session.New(ctx, cfg)
+	if strings.TrimSpace(opts.sessionPath) != "" {
+		runner, err := session.Open(ctx, cfg, opts.sessionPath)
+		return runner, nil, err
 	}
-	return session.Open(ctx, cfg, opts.sessionPath)
+
+	manager := session.NewManager(sessionRoot)
+	if opts.newSession {
+		meta, err := manager.Create(ctx, title)
+		if err != nil {
+			return nil, nil, err
+		}
+		runner, err := session.Open(ctx, cfg, meta.Path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID}, nil
+	}
+
+	if strings.TrimSpace(opts.resumeSessionID) != "" {
+		meta, err := manager.Resolve(ctx, opts.resumeSessionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		runner, err := session.Open(ctx, cfg, meta.Path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID}, nil
+	}
+
+	runner, err := session.New(ctx, cfg)
+	return runner, nil, err
+}
+
+func touchManagedSession(ctx context.Context, managed *cliManagedSession) error {
+	if managed == nil {
+		return nil
+	}
+	return managed.manager.Touch(ctx, managed.ID)
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {
@@ -207,6 +305,30 @@ func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 	}
 
 	return output, nil
+}
+
+func runListSessions(ctx context.Context, output io.Writer, root string) error {
+	metas, err := session.NewManager(root).List(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(output, formatSessionListOutput(metas)); err != nil {
+		return fmt.Errorf("write sessions: %w", err)
+	}
+	return nil
+}
+
+func formatSessionListOutput(metas []session.SessionMeta) string {
+	var builder strings.Builder
+	for _, meta := range metas {
+		builder.WriteString(meta.ID)
+		builder.WriteString("  ")
+		builder.WriteString(meta.UpdatedAt.UTC().Format(time.RFC3339))
+		builder.WriteString("  ")
+		builder.WriteString(meta.Title)
+		builder.WriteByte('\n')
+	}
+	return builder.String()
 }
 
 func formatRunOutput(output runOutput, includeTrace bool) string {

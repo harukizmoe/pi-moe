@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/logger"
@@ -136,6 +137,90 @@ func TestParseCLIOptionsAcceptsSessionFlag(t *testing.T) {
 	}
 }
 
+func TestParseCLIOptionsAcceptsSessionLifecycleFlags(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--new-session", "first", "prompt"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --new-session error = %v", err)
+	}
+	if !got.newSession {
+		t.Fatal("newSession = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "first prompt" {
+		t.Fatalf("promptArgs = %#v, want first prompt", got.promptArgs)
+	}
+
+	got, err = parseCLIOptions([]string{"--resume", "20260708-abc123", "next", "prompt"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --resume error = %v", err)
+	}
+	if got.resumeSessionID != "20260708-abc123" {
+		t.Fatalf("resumeSessionID = %q, want 20260708-abc123", got.resumeSessionID)
+	}
+	if strings.Join(got.promptArgs, " ") != "next prompt" {
+		t.Fatalf("promptArgs = %#v, want next prompt", got.promptArgs)
+	}
+
+	got, err = parseCLIOptions([]string{"--list-sessions"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --list-sessions error = %v", err)
+	}
+	if !got.listSessions {
+		t.Fatal("listSessions = false, want true")
+	}
+}
+
+func TestParseCLIOptionsRejectsConflictingSessionLifecycleFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "session and new", args: []string{"--session", "manual.jsonl", "--new-session", "prompt"}},
+		{name: "session and resume", args: []string{"--session", "manual.jsonl", "--resume", "abc", "prompt"}},
+		{name: "new and resume", args: []string{"--new-session", "--resume", "abc", "prompt"}},
+		{name: "list and prompt", args: []string{"--list-sessions", "prompt"}},
+		{name: "list and interactive", args: []string{"--list-sessions", "--interactive"}},
+		{name: "list and session", args: []string{"--list-sessions", "--session", "manual.jsonl"}},
+		{name: "list and new", args: []string{"--list-sessions", "--new-session"}},
+		{name: "list and resume", args: []string{"--list-sessions", "--resume", "abc"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseCLIOptions(tt.args); err == nil {
+				t.Fatalf("parseCLIOptions(%#v) error = nil, want conflict error", tt.args)
+			}
+		})
+	}
+}
+
+func TestFormatSessionListOutput(t *testing.T) {
+	metas := []session.SessionMeta{
+		{
+			ID:        "20260708-150405-a1b2c3",
+			Title:     "use calculator to compute 13 * 7",
+			UpdatedAt: time.Date(2026, 7, 8, 15, 4, 5, 0, time.UTC),
+		},
+		{
+			ID:        "20260708-151210-d4e5f6",
+			Title:     "second prompt",
+			UpdatedAt: time.Date(2026, 7, 8, 15, 12, 10, 0, time.UTC),
+		},
+	}
+
+	got := formatSessionListOutput(metas)
+	want := "20260708-150405-a1b2c3  2026-07-08T15:04:05Z  use calculator to compute 13 * 7\n" +
+		"20260708-151210-d4e5f6  2026-07-08T15:12:10Z  second prompt\n"
+	if got != want {
+		t.Fatalf("formatSessionListOutput() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSessionListOutputEmpty(t *testing.T) {
+	if got := formatSessionListOutput(nil); got != "" {
+		t.Fatalf("formatSessionListOutput(nil) = %q, want empty", got)
+	}
+}
+
 func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T) {
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
   default_provider: fake-local
@@ -209,6 +294,114 @@ func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T)
 	}
 	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt", "second prompt"}) {
 		t.Fatalf("reopened user prompts after second run = %#v, want first and second prompt", got)
+	}
+}
+
+func TestCLIManagedSessionNewAndResumeReuseTranscript(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+
+	firstOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--new-session",
+		"first prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() first error = %v", err)
+	}
+	firstInput, err := readInput(firstOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() first error = %v", err)
+	}
+	firstRunner, firstMeta, err := newCLISessionWithRoot(context.Background(), firstOptions, logger.NewNoop(), sessionRoot, firstInput)
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() first error = %v", err)
+	}
+	firstOutput, err := collectRunOutput(firstRunner.Prompt(context.Background(), firstInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() first error = %v", err)
+	}
+	if firstOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstOutput.Answer)
+	}
+	if err := touchManagedSession(context.Background(), firstMeta); err != nil {
+		t.Fatalf("touchManagedSession() first error = %v", err)
+	}
+
+	secondOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--resume", firstMeta.ID,
+		"second prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() second error = %v", err)
+	}
+	secondInput, err := readInput(secondOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() second error = %v", err)
+	}
+	secondRunner, secondMeta, err := newCLISessionWithRoot(context.Background(), secondOptions, logger.NewNoop(), sessionRoot, secondInput)
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() second error = %v", err)
+	}
+	if secondMeta.ID != firstMeta.ID {
+		t.Fatalf("resumed meta ID = %q, want %q", secondMeta.ID, firstMeta.ID)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt"}) {
+		t.Fatalf("reopened user prompts before second run = %#v, want first prompt", got)
+	}
+	secondOutput, err := collectRunOutput(secondRunner.Prompt(context.Background(), secondInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() second error = %v", err)
+	}
+	if secondOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("second answer = %q, want 13 * 7 = 91", secondOutput.Answer)
+	}
+}
+
+func TestRunListSessionsUsesManagerIndex(t *testing.T) {
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(sessionRoot)
+	first, err := manager.Create(context.Background(), "first prompt")
+	if err != nil {
+		t.Fatalf("Create() first error = %v", err)
+	}
+	second, err := manager.Create(context.Background(), "second prompt")
+	if err != nil {
+		t.Fatalf("Create() second error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if err := manager.Touch(context.Background(), first.ID); err != nil {
+		t.Fatalf("Touch() first error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := runListSessions(context.Background(), &output, sessionRoot); err != nil {
+		t.Fatalf("runListSessions() error = %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, first.ID+"  ") || !strings.Contains(got, second.ID+"  ") {
+		t.Fatalf("runListSessions() output = %q, want both ids %q and %q", got, first.ID, second.ID)
+	}
+	if strings.Index(got, first.ID) > strings.Index(got, second.ID) {
+		t.Fatalf("runListSessions() output = %q, want touched first before second", got)
+	}
+}
+
+func TestRunListSessionsWithMissingIndexPrintsNothing(t *testing.T) {
+	var output bytes.Buffer
+	if err := runListSessions(context.Background(), &output, filepath.Join(t.TempDir(), "sessions")); err != nil {
+		t.Fatalf("runListSessions() error = %v", err)
+	}
+	if output.String() != "" {
+		t.Fatalf("runListSessions() output = %q, want empty", output.String())
 	}
 }
 
