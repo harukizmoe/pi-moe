@@ -153,6 +153,10 @@ func (h *SessionHandler) Run(ctx *gin.Context) {
 	}
 	result, err := h.service.Run(ctx.Request.Context(), ctx.Param("id"), req.Input)
 	if err != nil {
+		if session.IsNotFound(err) {
+			writeError(ctx, http.StatusNotFound, err.Error())
+			return
+		}
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
 	}

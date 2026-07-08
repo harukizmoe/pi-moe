@@ -189,6 +189,18 @@ func TestRouterGetMissingSessionReturnsJSON404(t *testing.T) {
 	}
 }
 
+func TestRouterRunMissingSessionReturnsJSON404(t *testing.T) {
+	handler := newTestRouter(t)
+
+	response := postJSON(t, handler, "/v1/sessions/missing/runs", map[string]string{"input": "use calculator to compute 13 * 7"})
+
+	assertStatus(t, response, http.StatusNotFound)
+	body := decodeJSON[errorResponse](t, response)
+	if body.Error != `session "missing" not found` {
+		t.Fatalf("POST /v1/sessions/missing/runs error = %#v, want exact missing session message", body)
+	}
+}
+
 func TestRouterStreamsSessionRunAsSSE(t *testing.T) {
 	handler := newTestRouter(t)
 	created := createSession(t, handler, "stream calculator")
