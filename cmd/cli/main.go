@@ -35,11 +35,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runner, err := session.New(context.Background(), session.Config{
-		ProviderConfigPath: opts.configPath,
-		ProviderName:       opts.providerName,
-		Logger:             appLogger,
-	})
+	runner, err := newCLISession(context.Background(), opts, appLogger)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -65,11 +61,18 @@ func main() {
 }
 
 type cliOptions struct {
-	configPath   string
+	// configPath 指向 providers YAML，默认使用项目内开发配置。
+	configPath string
+	// providerName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
 	providerName string
+	// sessionPath 非空时启用 JSONL 会话恢复，空值保持一次性内存会话。
+	sessionPath string
+	// includeTrace 控制 CLI 是否输出 tool call 调试轨迹。
 	includeTrace bool
-	promptArgs   []string
-	interactive  bool
+	// promptArgs 保存 flag 解析后的剩余参数，会被拼接为本轮用户输入。
+	promptArgs []string
+	// interactive 表示复用同一 Session 逐行读取 prompt，直到 quit/exit/EOF。
+	interactive bool
 }
 
 func parseCLIOptions(args []string) (cliOptions, error) {
@@ -78,6 +81,7 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
+	flags.StringVar(&opts.sessionPath, "session", "", "session JSONL path")
 	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
 	flags.BoolVar(&opts.interactive, "interactive", false, "read prompts line by line until quit or EOF")
 
@@ -86,6 +90,19 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	}
 	opts.promptArgs = flags.Args()
 	return opts, nil
+}
+
+// newCLISession 根据 --session 决定使用内存 Session 还是 JSONL-backed Session。
+func newCLISession(ctx context.Context, opts cliOptions, appLogger logger.Logger) (*session.Session, error) {
+	cfg := session.Config{
+		ProviderConfigPath: opts.configPath,
+		ProviderName:       opts.providerName,
+		Logger:             appLogger,
+	}
+	if strings.TrimSpace(opts.sessionPath) == "" {
+		return session.New(ctx, cfg)
+	}
+	return session.Open(ctx, cfg, opts.sessionPath)
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {

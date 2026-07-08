@@ -122,6 +122,96 @@ func TestParseCLIOptionsAcceptsInteractiveFlagWithoutSwallowingPromptArgs(t *tes
 	}
 }
 
+func TestParseCLIOptionsAcceptsSessionFlag(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--session", "state/session.jsonl", "use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.sessionPath != "state/session.jsonl" {
+		t.Fatalf("sessionPath = %q, want state/session.jsonl", got.sessionPath)
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+
+	firstOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--session", sessionPath,
+		"first prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() first error = %v", err)
+	}
+	firstInput, err := readInput(firstOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() first error = %v", err)
+	}
+	firstRunner, err := session.Open(context.Background(), session.Config{
+		ProviderConfigPath: firstOptions.configPath,
+		ProviderName:       firstOptions.providerName,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, firstOptions.sessionPath)
+	if err != nil {
+		t.Fatalf("session.Open() first error = %v", err)
+	}
+	firstOutput, err := collectRunOutput(firstRunner.Prompt(context.Background(), firstInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() first error = %v", err)
+	}
+	if firstOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstOutput.Answer)
+	}
+
+	secondOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--session", sessionPath,
+		"second prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() second error = %v", err)
+	}
+	secondRunner, err := session.Open(context.Background(), session.Config{
+		ProviderConfigPath: secondOptions.configPath,
+		ProviderName:       secondOptions.providerName,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, secondOptions.sessionPath)
+	if err != nil {
+		t.Fatalf("session.Open() second error = %v", err)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt"}) {
+		t.Fatalf("reopened user prompts before second run = %#v, want first prompt", got)
+	}
+
+	secondInput, err := readInput(secondOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() second error = %v", err)
+	}
+	secondOutput, err := collectRunOutput(secondRunner.Prompt(context.Background(), secondInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() second error = %v", err)
+	}
+	if secondOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("second answer = %q, want 13 * 7 = 91", secondOutput.Answer)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt", "second prompt"}) {
+		t.Fatalf("reopened user prompts after second run = %#v, want first and second prompt", got)
+	}
+}
+
 func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
   default_provider: fake-local

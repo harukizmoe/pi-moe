@@ -174,6 +174,132 @@ func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
 	}
 }
 
+func TestSessionOpenRestoresJSONLBackedTranscript(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+
+	first, err := Open(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, sessionPath)
+	if err != nil {
+		t.Fatalf("Open() first error = %v", err)
+	}
+	if answer := collectSessionAnswer(t, first.Prompt(context.Background(), "use calculator to compute 13 * 7")); answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want %q", answer, "13 * 7 = 91")
+	}
+	want := first.Messages()
+
+	reopened, err := Open(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, sessionPath)
+	if err != nil {
+		t.Fatalf("Open() reopened error = %v", err)
+	}
+
+	got := reopened.Messages()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened Messages() = %#v, want %#v", got, want)
+	}
+	if len(got) != 4 {
+		t.Fatalf("reopened Messages() len = %d, want 4 terminal transcript facts: %#v", len(got), got)
+	}
+	if got[0].(agent.UserMessage).Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("reopened user message = %#v", got[0])
+	}
+	if got[3].(agent.AssistantMessage).Content != "13 * 7 = 91" {
+		t.Fatalf("reopened final assistant message = %#v", got[3])
+	}
+}
+
+func TestSessionOpenReturnsErrorForMalformedJSONL(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(sessionPath, []byte("{not-json}\n"), 0o600); err != nil {
+		t.Fatalf("write malformed session file: %v", err)
+	}
+
+	_, err := Open(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, sessionPath)
+	if err == nil {
+		t.Fatal("Open() error = nil, want malformed session file error")
+	}
+
+	errText := err.Error()
+	if !strings.Contains(errText, "parse session file") {
+		t.Fatalf("Open() error = %q, want session parse context", errText)
+	}
+	if !strings.Contains(errText, sessionPath) && !strings.Contains(errText, "line 1") && !strings.Contains(errText, "invalid character") {
+		t.Fatalf("Open() error = %q, want path, line, or JSON decoder context", errText)
+	}
+}
+
+func TestSessionOpenDoesNotDurablyPersistCanceledPrompt(t *testing.T) {
+	providerConfigPath := writeProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+
+	s, err := Open(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, sessionPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	provider := newBlockingProvider()
+	s.agent = agent.New(provider, tools.NewRegistry(), "blocking-model")
+
+	stream := s.Prompt(context.Background(), "prompt that will be canceled")
+	eventsDone := make(chan []Event, 1)
+	go func() {
+		eventsDone <- collectSessionStreamEvents(t, stream)
+	}()
+
+	<-provider.started
+	s.Cancel()
+	select {
+	case <-eventsDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Prompt() did not terminate after Cancel()")
+	}
+
+	reopened, err := Open(context.Background(), Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, sessionPath)
+	if err != nil {
+		t.Fatalf("Open() reopened error = %v", err)
+	}
+	if messages := reopened.Messages(); len(messages) != 0 {
+		t.Fatalf("reopened Messages() len after canceled prompt = %d, want 0: %#v", len(messages), messages)
+	}
+}
+
 func TestSessionMessagesReturnsDefensiveSnapshot(t *testing.T) {
 	s := newFakeSession(t)
 	collectSessionStreamEvents(t, s.Prompt(context.Background(), "use calculator to compute 13 * 7"))
