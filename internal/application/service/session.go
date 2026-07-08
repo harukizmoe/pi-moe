@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -51,6 +52,39 @@ type ToolStep struct {
 	Result string
 	// Error 是工具失败时的错误摘要。
 	Error string
+}
+
+// StreamEvent 描述对 HTTP SSE 稳定暴露的应用层事件。
+type StreamEvent struct {
+	// Name 是 SSE event 名称。
+	Name string
+	// Data 是可 JSON 序列化的事件数据。
+	Data any
+}
+
+type streamDeltaData struct {
+	Content string `json:"content"`
+}
+
+type streamToolCallData struct {
+	ID        string          `json:"id"`
+	Tool      string          `json:"tool"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type streamToolResultData struct {
+	ID     string `json:"id"`
+	Tool   string `json:"tool"`
+	Result string `json:"result"`
+	Error  string `json:"error,omitempty"`
+}
+
+type streamDoneData struct {
+	Answer string `json:"answer"`
+}
+
+type streamErrorData struct {
+	Error string `json:"error"`
 }
 
 // NewSessionService 创建 session 业务服务。
@@ -111,6 +145,85 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 		return result, err
 	}
 	return result, nil
+}
+
+// Stream 在指定 session 上执行一轮 prompt，并返回稳定的应用层流式事件。
+func (s *SessionService) Stream(ctx context.Context, sessionID string, input string) (<-chan StreamEvent, error) {
+	if s == nil {
+		return nil, fmt.Errorf("session service is nil")
+	}
+	if strings.TrimSpace(input) == "" {
+		return nil, fmt.Errorf("input must not be empty")
+	}
+	meta, err := s.store.Resolve(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	runner, err := session.Open(ctx, s.config, meta.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan StreamEvent)
+	go s.forwardStreamEvents(ctx, sessionID, runner.Prompt(ctx, input), out)
+	return out, nil
+}
+
+func (s *SessionService) forwardStreamEvents(ctx context.Context, sessionID string, events <-chan session.Event, out chan<- StreamEvent) {
+	defer close(out)
+	var answer string
+	for event := range events {
+		switch event := event.(type) {
+		case session.MessageDeltaEvent:
+			if event.Kind == session.MessageDeltaText && event.Delta != "" {
+				answer += event.Delta
+				if !sendStreamEvent(ctx, out, StreamEvent{Name: "delta", Data: streamDeltaData{Content: event.Delta}}) {
+					return
+				}
+			}
+		case session.ToolExecutionStartEvent:
+			if !sendStreamEvent(ctx, out, StreamEvent{Name: "tool_call", Data: streamToolCallData{ID: event.ToolCallID, Tool: event.ToolName, Arguments: json.RawMessage(event.Arguments)}}) {
+				return
+			}
+		case session.ToolExecutionEndEvent:
+			data := streamToolResultData{ID: event.ToolCallID, Tool: event.Result.ToolName}
+			if event.Error != nil {
+				data.Error = event.Error.Error()
+			} else if event.Result.IsError {
+				data.Error = event.Result.Content
+			} else {
+				data.Result = event.Result.Content
+			}
+			if !sendStreamEvent(ctx, out, StreamEvent{Name: "tool_result", Data: data}) {
+				return
+			}
+		case session.MessageEndEvent:
+			if len(event.Message.ToolCalls) == 0 {
+				answer = event.Message.Content
+			}
+		case session.RunEndEvent:
+			if err := s.store.Touch(ctx, sessionID); err != nil {
+				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: err.Error()}})
+				return
+			}
+			_ = sendStreamEvent(ctx, out, StreamEvent{Name: "done", Data: streamDoneData{Answer: answer}})
+			return
+		case session.ErrorEvent:
+			if event.Error != nil {
+				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: event.Error.Error()}})
+			}
+			return
+		}
+	}
+}
+
+func sendStreamEvent(ctx context.Context, out chan<- StreamEvent, event StreamEvent) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- event:
+		return true
+	}
 }
 
 func collectRunResult(events <-chan session.Event) (RunResult, error) {
