@@ -1,18 +1,19 @@
-package application
+package service
 
 import (
 	"context"
 	"fmt"
 	"strings"
 
+	"harukizmoe/pimoe/internal/application/data"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
 
-// Config 保存应用层服务需要的本地 session 和 Provider 配置。
-type Config struct {
-	// SessionRoot 是 manager-managed session index 和 JSONL transcript 的根目录。
-	SessionRoot string
+// SessionConfig 保存创建 SessionService 所需的依赖和 Provider 配置。
+type SessionConfig struct {
+	// Store 是 session metadata 的数据层接口。
+	Store data.SessionStore
 	// ProviderConfigPath 指向 providers YAML 配置文件。
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
@@ -21,14 +22,14 @@ type Config struct {
 	Logger logger.Logger
 }
 
-// Service 是 HTTP、CLI 等入口复用的应用层门面。
-type Service struct {
-	manager *session.Manager
-	config  session.Config
+// SessionService 编排 session metadata、transcript 和 Agent run。
+type SessionService struct {
+	store  data.SessionStore
+	config session.Config
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
-type SessionMeta = session.SessionMeta
+type SessionMeta = data.SessionMeta
 
 // RunResult 保存一次 prompt 运行的最终答案和工具步骤。
 type RunResult struct {
@@ -52,16 +53,16 @@ type ToolStep struct {
 	Error string
 }
 
-// NewService 创建复用 internal/session 的应用层服务。
-func NewService(cfg Config) (*Service, error) {
-	if strings.TrimSpace(cfg.SessionRoot) == "" {
-		return nil, fmt.Errorf("session root must not be empty")
+// NewSessionService 创建 session 业务服务。
+func NewSessionService(cfg SessionConfig) (*SessionService, error) {
+	if cfg.Store == nil {
+		return nil, fmt.Errorf("session store must not be nil")
 	}
 	if strings.TrimSpace(cfg.ProviderConfigPath) == "" {
 		return nil, fmt.Errorf("provider config path must not be empty")
 	}
-	return &Service{
-		manager: session.NewManager(cfg.SessionRoot),
+	return &SessionService{
+		store: cfg.Store,
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
@@ -70,34 +71,31 @@ func NewService(cfg Config) (*Service, error) {
 	}, nil
 }
 
-// CreateSession 创建一个 manager-managed session，并用 title 生成可读标题。
-func (s *Service) CreateSession(ctx context.Context, title string) (SessionMeta, error) {
+// Create 创建一个 managed session，并用 title 生成可读标题。
+func (s *SessionService) Create(ctx context.Context, title string) (SessionMeta, error) {
 	if s == nil {
-		return SessionMeta{}, fmt.Errorf("application service is nil")
+		return SessionMeta{}, fmt.Errorf("session service is nil")
 	}
-	return s.manager.Create(ctx, title)
+	return s.store.Create(ctx, title)
 }
 
-// ListSessions 按最近更新时间倒序返回本地 sessions。
-func (s *Service) ListSessions(ctx context.Context) ([]SessionMeta, error) {
+// List 返回可恢复 sessions。
+func (s *SessionService) List(ctx context.Context) ([]SessionMeta, error) {
 	if s == nil {
-		return nil, fmt.Errorf("application service is nil")
+		return nil, fmt.Errorf("session service is nil")
 	}
-	return s.manager.List(ctx)
+	return s.store.List(ctx)
 }
 
 // Run 在指定 session 上执行一轮 prompt，并返回最终答案和工具步骤。
-func (s *Service) Run(ctx context.Context, sessionID string, input string) (RunResult, error) {
+func (s *SessionService) Run(ctx context.Context, sessionID string, input string) (RunResult, error) {
 	if s == nil {
-		return RunResult{}, fmt.Errorf("application service is nil")
-	}
-	if strings.TrimSpace(sessionID) == "" {
-		return RunResult{}, fmt.Errorf("session id must not be empty")
+		return RunResult{}, fmt.Errorf("session service is nil")
 	}
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.store.Resolve(ctx, sessionID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -109,7 +107,7 @@ func (s *Service) Run(ctx context.Context, sessionID string, input string) (RunR
 	if err != nil {
 		return result, err
 	}
-	if err := s.manager.Touch(ctx, sessionID); err != nil {
+	if err := s.store.Touch(ctx, sessionID); err != nil {
 		return result, err
 	}
 	return result, nil

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 
-	"harukizmoe/pimoe/internal/application"
+	appdata "harukizmoe/pimoe/internal/application/data"
+	approuter "harukizmoe/pimoe/internal/application/router"
+	appservice "harukizmoe/pimoe/internal/application/service"
 	"harukizmoe/pimoe/internal/logger"
 )
 
@@ -42,8 +44,8 @@ func main() {
 			log.Printf("close logger: %v", err)
 		}
 	}()
-	service, err := application.NewService(application.Config{
-		SessionRoot:        opts.sessionRoot,
+	sessionService, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              appdata.NewManagerSessionStore(opts.sessionRoot),
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		Logger:             appLogger,
@@ -51,7 +53,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Addr: opts.addr, Handler: application.NewHTTPHandler(service)}
+	server := &http.Server{Addr: opts.addr, Handler: approuter.New(approuter.Config{SessionService: sessionService})}
 	if err := runServer(ctx, server); err != nil {
 		log.Fatal(err)
 	}
