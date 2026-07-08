@@ -1,0 +1,591 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"harukizmoe/pimoe/internal/agent"
+	"harukizmoe/pimoe/internal/logger"
+	"harukizmoe/pimoe/internal/session"
+)
+
+func TestReadInputJoinsArgsIntoPrompt(t *testing.T) {
+	got, err := readInput([]string{"use", "calculator", "to", "compute", "13", "*", "7"}, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() error = %v", err)
+	}
+
+	const want = "use calculator to compute 13 * 7"
+	if got != want {
+		t.Fatalf("readInput() = %q, want %q", got, want)
+	}
+}
+
+func TestReadInputReadsPromptFromStdinWhenArgsEmpty(t *testing.T) {
+	got, err := readInput(nil, strings.NewReader("prompt from stdin\n"))
+	if err != nil {
+		t.Fatalf("readInput() error = %v", err)
+	}
+
+	const want = "prompt from stdin"
+	if got != want {
+		t.Fatalf("readInput() = %q, want %q", got, want)
+	}
+}
+
+func TestReadInputRejectsEmptyOrWhitespaceInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		stdin string
+	}{
+		{name: "no args and empty stdin", stdin: ""},
+		{name: "no args and whitespace stdin", stdin: "  \n\t  "},
+		{name: "whitespace args", args: []string{" ", "\t"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readInput(tt.args, strings.NewReader(tt.stdin))
+			if err == nil {
+				t.Fatalf("readInput() error = nil, got %q", got)
+			}
+		})
+	}
+}
+
+func TestParseCLIOptionsDefaults(t *testing.T) {
+	got, err := parseCLIOptions([]string{"use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.configPath != defaultCLIProviderConfigPath {
+		t.Fatalf("configPath = %q, want %q", got.configPath, defaultCLIProviderConfigPath)
+	}
+	if got.providerName != "" {
+		t.Fatalf("providerName = %q, want empty", got.providerName)
+	}
+	if got.includeTrace {
+		t.Fatal("includeTrace = true, want false")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
+	got, err := parseCLIOptions([]string{
+		"--config", "testdata/providers.yaml",
+		"--provider", "moeco",
+		"--trace",
+		"use", "calculator",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.configPath != "testdata/providers.yaml" {
+		t.Fatalf("configPath = %q", got.configPath)
+	}
+	if got.providerName != "moeco" {
+		t.Fatalf("providerName = %q, want moeco", got.providerName)
+	}
+	if !got.includeTrace {
+		t.Fatal("includeTrace = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsInteractiveFlagWithoutSwallowingPromptArgs(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--interactive", "use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if !got.interactive {
+		t.Fatal("interactive = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+	if got.includeTrace {
+		t.Fatal("includeTrace = true, want false")
+	}
+}
+
+func TestParseCLIOptionsAcceptsSessionFlag(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--session", "state/session.jsonl", "use", "calculator"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if got.sessionPath != "state/session.jsonl" {
+		t.Fatalf("sessionPath = %q, want state/session.jsonl", got.sessionPath)
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsSessionLifecycleFlags(t *testing.T) {
+	got, err := parseCLIOptions([]string{"--new-session", "first", "prompt"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --new-session error = %v", err)
+	}
+	if !got.newSession {
+		t.Fatal("newSession = false, want true")
+	}
+	if strings.Join(got.promptArgs, " ") != "first prompt" {
+		t.Fatalf("promptArgs = %#v, want first prompt", got.promptArgs)
+	}
+
+	got, err = parseCLIOptions([]string{"--resume", "20260708-abc123", "next", "prompt"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --resume error = %v", err)
+	}
+	if got.resumeSessionID != "20260708-abc123" {
+		t.Fatalf("resumeSessionID = %q, want 20260708-abc123", got.resumeSessionID)
+	}
+	if strings.Join(got.promptArgs, " ") != "next prompt" {
+		t.Fatalf("promptArgs = %#v, want next prompt", got.promptArgs)
+	}
+
+	got, err = parseCLIOptions([]string{"--list-sessions"})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() --list-sessions error = %v", err)
+	}
+	if !got.listSessions {
+		t.Fatal("listSessions = false, want true")
+	}
+}
+
+func TestParseCLIOptionsRejectsConflictingSessionLifecycleFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "session and new", args: []string{"--session", "manual.jsonl", "--new-session", "prompt"}},
+		{name: "session and resume", args: []string{"--session", "manual.jsonl", "--resume", "abc", "prompt"}},
+		{name: "new and resume", args: []string{"--new-session", "--resume", "abc", "prompt"}},
+		{name: "list and prompt", args: []string{"--list-sessions", "prompt"}},
+		{name: "list and interactive", args: []string{"--list-sessions", "--interactive"}},
+		{name: "list and session", args: []string{"--list-sessions", "--session", "manual.jsonl"}},
+		{name: "list and new", args: []string{"--list-sessions", "--new-session"}},
+		{name: "list and resume", args: []string{"--list-sessions", "--resume", "abc"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseCLIOptions(tt.args); err == nil {
+				t.Fatalf("parseCLIOptions(%#v) error = nil, want conflict error", tt.args)
+			}
+		})
+	}
+}
+
+func TestFormatSessionListOutput(t *testing.T) {
+	metas := []session.SessionMeta{
+		{
+			ID:        "20260708-150405-a1b2c3",
+			Title:     "use calculator to compute 13 * 7",
+			UpdatedAt: time.Date(2026, 7, 8, 15, 4, 5, 0, time.UTC),
+		},
+		{
+			ID:        "20260708-151210-d4e5f6",
+			Title:     "second prompt",
+			UpdatedAt: time.Date(2026, 7, 8, 15, 12, 10, 0, time.UTC),
+		},
+	}
+
+	got := formatSessionListOutput(metas)
+	want := "20260708-150405-a1b2c3  2026-07-08T15:04:05Z  use calculator to compute 13 * 7\n" +
+		"20260708-151210-d4e5f6  2026-07-08T15:12:10Z  second prompt\n"
+	if got != want {
+		t.Fatalf("formatSessionListOutput() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSessionListOutputEmpty(t *testing.T) {
+	if got := formatSessionListOutput(nil); got != "" {
+		t.Fatalf("formatSessionListOutput(nil) = %q, want empty", got)
+	}
+}
+
+func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+
+	firstOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--session", sessionPath,
+		"first prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() first error = %v", err)
+	}
+	firstInput, err := readInput(firstOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() first error = %v", err)
+	}
+	firstRunner, err := session.Open(context.Background(), session.Config{
+		ProviderConfigPath: firstOptions.configPath,
+		ProviderName:       firstOptions.providerName,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, firstOptions.sessionPath)
+	if err != nil {
+		t.Fatalf("session.Open() first error = %v", err)
+	}
+	firstOutput, err := collectRunOutput(firstRunner.Prompt(context.Background(), firstInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() first error = %v", err)
+	}
+	if firstOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstOutput.Answer)
+	}
+
+	secondOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--session", sessionPath,
+		"second prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() second error = %v", err)
+	}
+	secondRunner, err := session.Open(context.Background(), session.Config{
+		ProviderConfigPath: secondOptions.configPath,
+		ProviderName:       secondOptions.providerName,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	}, secondOptions.sessionPath)
+	if err != nil {
+		t.Fatalf("session.Open() second error = %v", err)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt"}) {
+		t.Fatalf("reopened user prompts before second run = %#v, want first prompt", got)
+	}
+
+	secondInput, err := readInput(secondOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() second error = %v", err)
+	}
+	secondOutput, err := collectRunOutput(secondRunner.Prompt(context.Background(), secondInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() second error = %v", err)
+	}
+	if secondOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("second answer = %q, want 13 * 7 = 91", secondOutput.Answer)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt", "second prompt"}) {
+		t.Fatalf("reopened user prompts after second run = %#v, want first and second prompt", got)
+	}
+}
+
+func TestCLIManagedSessionNewAndResumeReuseTranscript(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+
+	firstOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--new-session",
+		"first prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() first error = %v", err)
+	}
+	firstInput, err := readInput(firstOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() first error = %v", err)
+	}
+	firstRunner, firstMeta, err := newCLISessionWithRoot(context.Background(), firstOptions, logger.NewNoop(), sessionRoot, firstInput)
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() first error = %v", err)
+	}
+	firstOutput, err := collectRunOutput(firstRunner.Prompt(context.Background(), firstInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() first error = %v", err)
+	}
+	if firstOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstOutput.Answer)
+	}
+	if err := touchManagedSession(context.Background(), firstMeta); err != nil {
+		t.Fatalf("touchManagedSession() first error = %v", err)
+	}
+
+	secondOptions, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--resume", firstMeta.ID,
+		"second prompt",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() second error = %v", err)
+	}
+	secondInput, err := readInput(secondOptions.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() second error = %v", err)
+	}
+	secondRunner, secondMeta, err := newCLISessionWithRoot(context.Background(), secondOptions, logger.NewNoop(), sessionRoot, secondInput)
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() second error = %v", err)
+	}
+	if secondMeta.ID != firstMeta.ID {
+		t.Fatalf("resumed meta ID = %q, want %q", secondMeta.ID, firstMeta.ID)
+	}
+	if got := collectUserPrompts(secondRunner.Messages()); !reflect.DeepEqual(got, []string{"first prompt"}) {
+		t.Fatalf("reopened user prompts before second run = %#v, want first prompt", got)
+	}
+	secondOutput, err := collectRunOutput(secondRunner.Prompt(context.Background(), secondInput))
+	if err != nil {
+		t.Fatalf("collectRunOutput() second error = %v", err)
+	}
+	if secondOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("second answer = %q, want 13 * 7 = 91", secondOutput.Answer)
+	}
+}
+
+func TestRunListSessionsUsesManagerIndex(t *testing.T) {
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(sessionRoot)
+	first, err := manager.Create(context.Background(), "first prompt")
+	if err != nil {
+		t.Fatalf("Create() first error = %v", err)
+	}
+	second, err := manager.Create(context.Background(), "second prompt")
+	if err != nil {
+		t.Fatalf("Create() second error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	if err := manager.Touch(context.Background(), first.ID); err != nil {
+		t.Fatalf("Touch() first error = %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := runListSessions(context.Background(), &output, sessionRoot); err != nil {
+		t.Fatalf("runListSessions() error = %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, first.ID+"  ") || !strings.Contains(got, second.ID+"  ") {
+		t.Fatalf("runListSessions() output = %q, want both ids %q and %q", got, first.ID, second.ID)
+	}
+	if strings.Index(got, first.ID) > strings.Index(got, second.ID) {
+		t.Fatalf("runListSessions() output = %q, want touched first before second", got)
+	}
+}
+
+func TestRunListSessionsWithMissingIndexPrintsNothing(t *testing.T) {
+	var output bytes.Buffer
+	if err := runListSessions(context.Background(), &output, filepath.Join(t.TempDir(), "sessions")); err != nil {
+		t.Fatalf("runListSessions() error = %v", err)
+	}
+	if output.String() != "" {
+		t.Fatalf("runListSessions() output = %q, want empty", output.String())
+	}
+}
+
+func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	runner, err := session.New(context.Background(), session.Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("session.New() error = %v", err)
+	}
+
+	input := strings.NewReader("first prompt\nsecond prompt\nquit\n")
+	var output bytes.Buffer
+
+	if err := runInteractive(context.Background(), runner, input, &output, false); err != nil {
+		t.Fatalf("runInteractive() error = %v", err)
+	}
+
+	if got := strings.Count(output.String(), "13 * 7 = 91\n"); got != 2 {
+		t.Fatalf("final answer occurrences = %d, want 2 in %q", got, output.String())
+	}
+
+	if got := collectUserPrompts(runner.Messages()); !reflect.DeepEqual(got, []string{"first prompt", "second prompt"}) {
+		t.Fatalf("session user prompts = %#v, want first and second prompt", got)
+	}
+}
+
+func TestRunInteractiveAcceptsPromptLongerThanScannerTokenLimit(t *testing.T) {
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+
+	runner, err := session.New(context.Background(), session.Config{
+		ProviderConfigPath: providerConfigPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		t.Fatalf("session.New() error = %v", err)
+	}
+
+	longPrompt := strings.Repeat("x", 70*1024)
+	input := strings.NewReader(longPrompt + "\nquit\n")
+	var output bytes.Buffer
+
+	if err := runInteractive(context.Background(), runner, input, &output, false); err != nil {
+		t.Fatalf("runInteractive() error for %d-byte line = %v", len(longPrompt), err)
+	}
+
+	if got := strings.Count(output.String(), "13 * 7 = 91\n"); got != 1 {
+		t.Fatalf("final answer occurrences = %d, want 1 in %q", got, output.String())
+	}
+
+	prompts := collectUserPrompts(runner.Messages())
+	if len(prompts) != 1 {
+		t.Fatalf("session user prompts len = %d, want 1", len(prompts))
+	}
+	if prompts[0] != longPrompt {
+		t.Fatalf("stored prompt len = %d, want %d", len(prompts[0]), len(longPrompt))
+	}
+}
+
+func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T) {
+	output, err := collectRunOutput(eventStream(
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "done without tools"}},
+		session.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
+	}
+
+	got := formatRunOutput(output, false)
+
+	const want = "done without tools\n"
+	if got != want {
+		t.Fatalf("formatRunOutput(answer only) = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "tool=") || strings.Contains(got, "arguments=") || strings.Contains(got, "result=") || strings.Contains(got, "error=") {
+		t.Fatalf("formatRunOutput(answer only) leaked trace fields: %q", got)
+	}
+}
+
+func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
+	output, err := collectRunOutput(eventStream(
+		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
+		session.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
+	}
+
+	got := formatRunOutput(output, true)
+
+	if !strings.HasPrefix(got, "final answer: 20\n") {
+		t.Fatalf("formatRunOutput(trace) prefix = %q, want answer followed by newline", got)
+	}
+	for _, want := range []string{
+		"tool=calculator",
+		`arguments={"a":2,"b":3,"op":"add"}`,
+		"result=5",
+		`arguments={"a":5,"b":4,"op":"multiply"}`,
+		"result=20",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatRunOutput(trace) missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
+	toolErr := errors.New("upstream unavailable")
+	output, err := collectRunOutput(eventStream(
+		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
+		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
+		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
+		session.RunEndEvent{RunID: "run-1"},
+	))
+	if err != nil {
+		t.Fatalf("collectRunOutput() error = %v", err)
+	}
+
+	got := formatRunOutput(output, true)
+
+	if !strings.HasPrefix(got, "could not complete weather lookup\n") {
+		t.Fatalf("formatRunOutput(trace error) prefix = %q, want answer followed by newline", got)
+	}
+	for _, want := range []string{
+		"tool=weather",
+		`arguments={"city":"Tokyo"}`,
+		"error=upstream unavailable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatRunOutput(trace error) missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "result=<nil>") {
+		t.Fatalf("formatRunOutput(trace error) exposed nil result placeholder: %q", got)
+	}
+}
+
+func eventStream(events ...session.Event) <-chan session.Event {
+	stream := make(chan session.Event, len(events))
+	for _, event := range events {
+		stream <- event
+	}
+	close(stream)
+	return stream
+}
+
+func writeCLIProvidersConfig(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "providers.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write providers config: %v", err)
+	}
+	return path
+}
+
+func collectUserPrompts(messages []agent.Message) []string {
+	userPrompts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		userMessage, ok := message.(agent.UserMessage)
+		if ok {
+			userPrompts = append(userPrompts, userMessage.Content)
+		}
+	}
+	return userPrompts
+}
