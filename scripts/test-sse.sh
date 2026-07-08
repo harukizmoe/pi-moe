@@ -114,6 +114,14 @@ detail_body="$(get_json "/v1/sessions/$run_session_id")" || fail "session detail
 json_assert_session_detail "$detail_body" "$run_session_id" || fail "session detail response is invalid" "$detail_body"
 ok "session detail returned persisted transcript"
 
+resume_body="$(post_json "/v1/sessions/$run_session_id/runs" '{"input":"what was the previous result?"}')" || fail "resume run request failed"
+contains "$resume_body" "previous result was 91" || fail "resume run did not use restored transcript" "$resume_body"
+ok "resume run used restored transcript"
+
+resume_detail_body="$(get_json "/v1/sessions/$run_session_id")" || fail "resume detail request failed"
+contains "$resume_detail_body" "previous result was 91" || fail "resume detail missing second answer" "$resume_detail_body"
+ok "session detail returned resumed transcript"
+
 stream_session_id="$(create_session)"
 ok "created stream session $stream_session_id"
 
