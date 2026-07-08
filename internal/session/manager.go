@@ -20,6 +20,16 @@ const (
 	untitledSessionTitle      = "untitled session"
 )
 
+// nowUTC 返回当前 UTC 时间；测试可替换它以稳定验证时间相关行为。
+var nowUTC = func() time.Time { return time.Now().UTC() }
+
+// SetNowForTest 在测试中替换 manager 使用的当前时间。
+func SetNowForTest(t interface{ Cleanup(func()) }, now func() time.Time) {
+	old := nowUTC
+	nowUTC = now
+	t.Cleanup(func() { nowUTC = old })
+}
+
 // Manager 管理本地 session index 和 session 文件路径。
 type Manager struct {
 	root string
@@ -86,7 +96,7 @@ func (m *Manager) Create(ctx context.Context, title string) (SessionMeta, error)
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	now := time.Now().UTC()
+	now := nowUTC()
 	id, err := newSessionID(now)
 	if err != nil {
 		return SessionMeta{}, err
@@ -162,12 +172,12 @@ func (m *Manager) Touch(ctx context.Context, id string) error {
 	}
 	for i := range index.Sessions {
 		if index.Sessions[i].ID == id {
-			index.Sessions[i].UpdatedAt = time.Now().UTC()
+			index.Sessions[i].UpdatedAt = nowUTC()
 			index.Current = id
 			return m.saveIndex(index)
 		}
 	}
-	return fmt.Errorf("session %q not found", id)
+	return notFoundError{id: id}
 }
 
 func (m *Manager) indexPath() string {

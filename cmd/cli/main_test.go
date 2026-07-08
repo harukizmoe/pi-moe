@@ -375,6 +375,8 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
       model: fake-tool-model
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
+	clock := time.Date(2026, 7, 8, 13, 0, 0, 0, time.UTC)
+	session.SetNowForTest(t, func() time.Time { return clock })
 	newOpts, err := parseCLIOptions([]string{"--config", providerConfigPath, "--provider", "fake-local", "--new-session", "use calculator to compute 13 * 7"})
 	if err != nil {
 		t.Fatalf("parse new options: %v", err)
@@ -398,7 +400,7 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve() before error = %v", err)
 	}
-	time.Sleep(time.Millisecond)
+	clock = clock.Add(time.Second)
 
 	resumeOpts, err := parseCLIOptions([]string{"--config", providerConfigPath, "--provider", "fake-local", "--resume", managed.ID, "what was the previous result?"})
 	if err != nil {
