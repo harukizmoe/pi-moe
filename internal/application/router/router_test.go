@@ -129,6 +129,42 @@ func TestRouterReturnsSessionDetailWithStableMessageHistory(t *testing.T) {
 	assertCalculatorTranscript(t, detail.Messages)
 }
 
+func TestRouterRunsAppendToExistingSessionTranscript(t *testing.T) {
+	handler := newTestRouter(t)
+	created := createSession(t, handler, "resume calculator")
+
+	first := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{"input": "use calculator to compute 13 * 7"})
+	assertStatus(t, first, http.StatusOK)
+	firstBody := decodeJSON[runResponse](t, first)
+	if firstBody.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstBody.Answer)
+	}
+
+	second := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{"input": "what was the previous result?"})
+	assertStatus(t, second, http.StatusOK)
+	secondBody := decodeJSON[runResponse](t, second)
+	if secondBody.Answer != "previous result was 91" {
+		t.Fatalf("second answer = %q, want previous result was 91", secondBody.Answer)
+	}
+
+	detailResp := httptest.NewRecorder()
+	handler.ServeHTTP(detailResp, httptest.NewRequest(http.MethodGet, "/v1/sessions/"+created.ID, nil))
+	assertStatus(t, detailResp, http.StatusOK)
+	detail := decodeJSON[sessionDetailResponse](t, detailResp)
+	if len(detail.Messages) != 6 {
+		t.Fatalf("detail messages len = %d, want 6: %#v", len(detail.Messages), detail.Messages)
+	}
+	if detail.Messages[4].Role != "user" || detail.Messages[4].Content != "what was the previous result?" {
+		t.Fatalf("second user message = %#v", detail.Messages[4])
+	}
+	if detail.Messages[5].Role != "assistant" || detail.Messages[5].Content != "previous result was 91" {
+		t.Fatalf("second assistant message = %#v", detail.Messages[5])
+	}
+	if detail.UpdatedAt == created.UpdatedAt {
+		t.Fatalf("updated_at did not change after resumed runs: %q", detail.UpdatedAt)
+	}
+}
+
 func TestRouterGetMissingSessionReturnsJSON404(t *testing.T) {
 	handler := newTestRouter(t)
 

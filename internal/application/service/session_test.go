@@ -64,6 +64,46 @@ func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "resume calculator")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	second, err := svc.Run(ctx, created.ID, "what was the previous result?")
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if second.Answer != "previous result was 91" {
+		t.Fatalf("second Run() Answer = %q, want previous result was 91", second.Answer)
+	}
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(detail.Messages) != 6 {
+		t.Fatalf("detail Messages len = %d, want 6: %#v", len(detail.Messages), detail.Messages)
+	}
+	if detail.Messages[4].Role != "user" || detail.Messages[4].Content != "what was the previous result?" {
+		t.Fatalf("second user message = %#v", detail.Messages[4])
+	}
+	if detail.Messages[5].Role != "assistant" || detail.Messages[5].Content != "previous result was 91" {
+		t.Fatalf("second assistant message = %#v", detail.Messages[5])
+	}
+}
+
 func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
 	ctx := context.Background()
 	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
