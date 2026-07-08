@@ -17,6 +17,7 @@ type SessionService interface {
 	Create(ctx context.Context, title string) (appservice.SessionMeta, error)
 	List(ctx context.Context) ([]appservice.SessionMeta, error)
 	Run(ctx context.Context, sessionID string, input string) (appservice.RunResult, error)
+	Stream(ctx context.Context, sessionID string, input string) (<-chan appservice.StreamEvent, error)
 }
 
 // SessionHandler 处理 session 相关 HTTP 请求。
@@ -107,6 +108,35 @@ func (h *SessionHandler) Run(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, newRunResponse(result))
+}
+
+// Stream 在指定 session 上执行一轮 prompt，并以 SSE 返回事件流。
+func (h *SessionHandler) Stream(ctx *gin.Context) {
+	var req runRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		writeError(ctx, http.StatusBadRequest, err.Error())
+		return
+	}
+	events, err := h.service.Stream(ctx.Request.Context(), ctx.Param("id"), req.Input)
+	if err != nil {
+		writeError(ctx, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx.Header("Content-Type", "text/event-stream")
+	ctx.Header("Cache-Control", "no-cache")
+	ctx.Header("Connection", "keep-alive")
+	ctx.Status(http.StatusOK)
+	flusher, ok := ctx.Writer.(http.Flusher)
+	if !ok {
+		writeError(ctx, http.StatusInternalServerError, "streaming is not supported")
+		return
+	}
+
+	for event := range events {
+		ctx.SSEvent(event.Name, event.Data)
+		flusher.Flush()
+	}
 }
 
 func newSessionResponse(meta appservice.SessionMeta) sessionResponse {

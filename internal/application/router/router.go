@@ -26,6 +26,7 @@ func New(cfg Config) *gin.Engine {
 		v1.POST("/sessions", sessionHandler.Create)
 		v1.GET("/sessions", sessionHandler.List)
 		v1.POST("/sessions/:id/runs", sessionHandler.Run)
+		v1.POST("/sessions/:id/runs/stream", sessionHandler.Stream)
 	}
 	return r
 }

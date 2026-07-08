@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,36 @@ func TestRouterServesHealthAndSessionRoutesThroughGin(t *testing.T) {
 	}
 	if len(runBody.Steps) != 1 || runBody.Steps[0].Tool != "calculator" || runBody.Steps[0].Result != "91" {
 		t.Fatalf("run steps = %#v, want calculator result", runBody.Steps)
+	}
+}
+
+func TestRouterStreamsSessionRunAsSSE(t *testing.T) {
+	handler := newTestRouter(t)
+	created := createSession(t, handler, "stream calculator")
+
+	response := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs/stream", map[string]string{
+		"input": "use calculator to compute 13 * 7",
+	})
+
+	assertStatus(t, response, http.StatusOK)
+	contentType := response.Header().Get("Content-Type")
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	body := response.Body.String()
+	for _, want := range []string{
+		"event:delta\n",
+		`data:{"content":"13 * 7 = 91"}`,
+		"event:tool_call\n",
+		`"tool":"calculator"`,
+		"event:tool_result\n",
+		`"result":"91"`,
+		"event:done\n",
+		`"answer":"13 * 7 = 91"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("SSE body missing %q in:\n%s", want, body)
+		}
 	}
 }
 
