@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"harukizmoe/pimoe/internal/agent"
 	"harukizmoe/pimoe/internal/application/data"
 	appconfig "harukizmoe/pimoe/internal/config"
+	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
@@ -32,6 +34,37 @@ type SessionService struct {
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
 type SessionMeta = data.SessionMeta
+
+// SessionDetail 描述一个 session 的 metadata 和已持久化 transcript。
+type SessionDetail struct {
+	SessionMeta
+	// Messages 是按执行顺序恢复的 terminal transcript。
+	Messages []SessionMessage
+}
+
+// SessionMessage 是对外稳定暴露的 transcript message DTO。
+type SessionMessage struct {
+	// Role 是 user、assistant 或 tool。
+	Role string
+	// Content 是 message 的可见文本或工具结果。
+	Content string
+	// ToolCalls 保存 assistant 请求执行的工具调用。
+	ToolCalls []SessionToolCall
+	// ToolCallID 将 tool result 关联到 assistant tool call。
+	ToolCallID string
+	// Tool 是 tool result 对应的本地工具名。
+	Tool string
+}
+
+// SessionToolCall 是 assistant message 中的工具调用。
+type SessionToolCall struct {
+	// ID 是模型生成的 tool call id。
+	ID string
+	// Tool 是本地工具名。
+	Tool string
+	// Arguments 是模型传给工具的原始 JSON 参数。
+	Arguments json.RawMessage
+}
 
 // RunResult 保存一次 prompt 运行的最终答案和工具步骤。
 type RunResult struct {
@@ -189,6 +222,26 @@ func (s *SessionService) List(ctx context.Context) ([]SessionMeta, error) {
 	return s.store.List(ctx)
 }
 
+// Get 返回 session metadata 和当前可恢复 transcript。
+func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDetail, error) {
+	if s == nil {
+		return SessionDetail{}, fmt.Errorf("session service is nil")
+	}
+	meta, err := s.store.Resolve(ctx, sessionID)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	loaded, err := session.LoadMessages(meta.Path)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	messages, err := newSessionMessages(loaded)
+	if err != nil {
+		return SessionDetail{}, err
+	}
+	return SessionDetail{SessionMeta: meta, Messages: messages}, nil
+}
+
 // Run 在指定 session 上执行一轮 prompt，并返回最终答案和工具步骤。
 func (s *SessionService) Run(ctx context.Context, sessionID string, input string) (RunResult, error) {
 	if s == nil {
@@ -235,6 +288,50 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	out := make(chan StreamEvent)
 	go s.forwardStreamEvents(ctx, sessionID, runner.Prompt(ctx, input), out)
 	return out, nil
+}
+
+func newSessionMessages(messages []agent.Message) ([]SessionMessage, error) {
+	out := make([]SessionMessage, 0, len(messages))
+	for _, message := range messages {
+		converted, err := newSessionMessage(message)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, converted)
+	}
+	return out, nil
+}
+
+func newSessionMessage(message agent.Message) (SessionMessage, error) {
+	switch msg := message.(type) {
+	case agent.UserMessage:
+		return SessionMessage{Role: string(llms.RoleUser), Content: msg.Content}, nil
+	case agent.AssistantMessage:
+		return SessionMessage{Role: string(llms.RoleAssistant), Content: msg.Content, ToolCalls: newSessionToolCalls(msg.ToolCalls)}, nil
+	case agent.ToolResultMessage:
+		return SessionMessage{Role: string(llms.RoleTool), ToolCallID: msg.ToolCallID, Tool: msg.ToolName, Content: msg.Content}, nil
+	default:
+		return SessionMessage{}, fmt.Errorf("unsupported session message type %T", message)
+	}
+}
+
+func newSessionToolCalls(calls []llms.ToolCall) []SessionToolCall {
+	out := make([]SessionToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, SessionToolCall{ID: call.ID, Tool: call.Function.Name, Arguments: stableRawJSON(call.Function.Arguments)})
+	}
+	return out
+}
+
+func stableRawJSON(value string) json.RawMessage {
+	if json.Valid([]byte(value)) {
+		return json.RawMessage(value)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return encoded
 }
 
 func (s *SessionService) forwardStreamEvents(ctx context.Context, sessionID string, events <-chan session.Event, out chan<- StreamEvent) {

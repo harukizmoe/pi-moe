@@ -64,6 +64,150 @@ func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
 	}
 }
 
+func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	created, err := svc.Create(ctx, "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	wantMetas, err := svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(wantMetas) != 1 {
+		t.Fatalf("List() len = %d, want 1: %#v", len(wantMetas), wantMetas)
+	}
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	wantMeta := wantMetas[0]
+	if detail.ID != wantMeta.ID || detail.Title != wantMeta.Title || !detail.CreatedAt.Equal(wantMeta.CreatedAt) || !detail.UpdatedAt.Equal(wantMeta.UpdatedAt) {
+		t.Fatalf("Get() metadata = %#v, want %#v", detail, wantMeta)
+	}
+	if len(detail.Messages) != 4 {
+		t.Fatalf("Get() Messages len = %d, want 4 terminal messages: %#v", len(detail.Messages), detail.Messages)
+	}
+
+	user := detail.Messages[0]
+	if user.Role != "user" || user.Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("Get() user message = %#v, want calculator prompt", user)
+	}
+	assistantToolCall := detail.Messages[1]
+	if assistantToolCall.Role != "assistant" || len(assistantToolCall.ToolCalls) != 1 {
+		t.Fatalf("Get() assistant tool call message = %#v, want one calculator tool call", assistantToolCall)
+	}
+	call := assistantToolCall.ToolCalls[0]
+	if call.ID != "call_fake_calculator" || call.Tool != "calculator" {
+		t.Fatalf("Get() tool call = %#v, want calculator call", call)
+	}
+	assertJSONEqual(t, call.Arguments, `{"a":13,"b":7,"op":"mul"}`)
+
+	toolResult := detail.Messages[2]
+	if toolResult.Role != "tool" || toolResult.ToolCallID != call.ID || toolResult.Tool != "calculator" || toolResult.Content != "91" {
+		t.Fatalf("Get() tool result message = %#v, want calculator result 91 for call %q", toolResult, call.ID)
+	}
+	finalAssistant := detail.Messages[3]
+	if finalAssistant.Role != "assistant" || finalAssistant.Content != "13 * 7 = 91" || len(finalAssistant.ToolCalls) != 0 {
+		t.Fatalf("Get() final assistant message = %#v, want final answer", finalAssistant)
+	}
+}
+
+func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "sessions")
+	store := appdata.NewManagerSessionStore(root)
+	workingConfig := writeProvidersConfig(t)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: workingConfig,
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	brokenConfig := writeProvidersConfigContent(t, `llms:
+  default_provider: broken
+  providers:
+    broken:
+      type: openai_compatible
+      model: gpt-test
+`)
+	readOnlySvc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: brokenConfig,
+		ProviderName:       "broken",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() with broken provider config error = %v", err)
+	}
+
+	detail, err := readOnlySvc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() with broken provider config error = %v", err)
+	}
+	if len(detail.Messages) != 4 || detail.Messages[3].Content != "13 * 7 = 91" {
+		t.Fatalf("Get() Messages = %#v, want persisted calculator transcript", detail.Messages)
+	}
+}
+
+func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "sessions")
+	store := appdata.NewManagerSessionStore(root)
+	created, err := store.Create(ctx, "malformed tool args")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	writeSessionJSONL(t, created.Path, []string{
+		`{"id":"m1","type":"message","timestamp":"2026-07-08T00:00:00Z","message":{"role":"assistant","tool_calls":[{"id":"bad-call","type":"function","function":{"name":"calculator","arguments":"{bad json"}}]}}`,
+		`{"id":"m2","parent_id":"m1","type":"message","timestamp":"2026-07-08T00:00:01Z","message":{"role":"tool","tool_call_id":"bad-call","tool_name":"calculator","content":"invalid arguments","is_error":true}}`,
+		`{"id":"leaf","parent_id":"m2","type":"leaf","timestamp":"2026-07-08T00:00:02Z","leaf":{"entry_id":"m2"}}`,
+	})
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	payload, err := json.Marshal(detail.Messages)
+	if err != nil {
+		t.Fatalf("marshal Get() messages error = %v; messages = %#v", err, detail.Messages)
+	}
+	if !strings.Contains(string(payload), `"Arguments":"{bad json"`) {
+		t.Fatalf("marshaled messages = %s, want malformed arguments preserved as JSON string", payload)
+	}
+}
+
 func writeProvidersConfig(t *testing.T) string {
 	t.Helper()
 	return writeProvidersConfigContent(t, `llms:
@@ -82,6 +226,14 @@ func writeProvidersConfigContent(t *testing.T, content string) string {
 		t.Fatalf("write providers config: %v", err)
 	}
 	return path
+}
+
+func writeSessionJSONL(t *testing.T, path string, lines []string) {
+	t.Helper()
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write session JSONL: %v", err)
+	}
 }
 
 func TestSessionServiceStreamReturnsStableApplicationEvents(t *testing.T) {
@@ -313,4 +465,37 @@ func normalizeStreamData(t *testing.T, value any) map[string]any {
 		t.Fatalf("unmarshal stream data: %v", err)
 	}
 	return out
+}
+
+func assertJSONEqual(t *testing.T, got any, want string) {
+	t.Helper()
+	var gotBytes []byte
+	switch value := got.(type) {
+	case json.RawMessage:
+		gotBytes = value
+	case []byte:
+		gotBytes = value
+	case string:
+		gotBytes = []byte(value)
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal JSON value %T: %v", got, err)
+		}
+		gotBytes = encoded
+	}
+	if !json.Valid(gotBytes) {
+		t.Fatalf("JSON value = %q, want valid JSON", string(gotBytes))
+	}
+	var normalizedGot any
+	if err := json.Unmarshal(gotBytes, &normalizedGot); err != nil {
+		t.Fatalf("unmarshal JSON value %q: %v", string(gotBytes), err)
+	}
+	var normalizedWant any
+	if err := json.Unmarshal([]byte(want), &normalizedWant); err != nil {
+		t.Fatalf("unmarshal expected JSON %q: %v", want, err)
+	}
+	if !reflect.DeepEqual(normalizedGot, normalizedWant) {
+		t.Fatalf("JSON value = %#v, want %#v", normalizedGot, normalizedWant)
+	}
 }

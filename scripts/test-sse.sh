@@ -55,6 +55,35 @@ post_sse() {
     -d "$body"
 }
 
+get_json() {
+  local path="$1"
+  curl -sS "$BASE_URL$path"
+}
+
+json_assert_session_detail() {
+  DETAIL_JSON="$1" SESSION_ID="$2" EXPECTED_ANSWER="$EXPECTED_ANSWER" python3 - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["DETAIL_JSON"])
+if payload.get("id") != os.environ["SESSION_ID"]:
+    raise SystemExit("session detail returned wrong id")
+messages = payload.get("messages")
+if not isinstance(messages, list) or len(messages) != 4:
+    raise SystemExit(f"session detail message count = {len(messages) if isinstance(messages, list) else 'invalid'}")
+if messages[0].get("role") != "user" or messages[0].get("content") != "use calculator to compute 13 * 7":
+    raise SystemExit("session detail missing user prompt")
+tool_calls = messages[1].get("tool_calls") or []
+if messages[1].get("role") != "assistant" or len(tool_calls) != 1 or tool_calls[0].get("tool") != "calculator":
+    raise SystemExit("session detail missing assistant calculator tool call")
+if messages[2].get("role") != "tool" or messages[2].get("tool") != "calculator" or messages[2].get("content") != "91":
+    raise SystemExit("session detail missing calculator tool result")
+if messages[3].get("role") != "assistant" or messages[3].get("content") != os.environ["EXPECTED_ANSWER"]:
+    raise SystemExit("session detail missing final assistant answer")
+PY
+}
+
 create_session() {
   local body
   local id
@@ -80,6 +109,10 @@ ok "created sync session $run_session_id"
 run_body="$(post_json "/v1/sessions/$run_session_id/runs" "{\"input\":\"$PROMPT\"}")" || fail "sync run request failed"
 contains "$run_body" "$EXPECTED_ANSWER" || fail "sync run did not contain expected answer" "$run_body"
 ok "sync run returned expected answer"
+
+detail_body="$(get_json "/v1/sessions/$run_session_id")" || fail "session detail request failed"
+json_assert_session_detail "$detail_body" "$run_session_id" || fail "session detail response is invalid" "$detail_body"
+ok "session detail returned persisted transcript"
 
 stream_session_id="$(create_session)"
 ok "created stream session $stream_session_id"

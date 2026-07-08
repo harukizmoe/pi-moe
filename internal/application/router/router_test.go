@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,32 @@ type sessionResponse struct {
 	Title     string `json:"title"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+}
+
+type sessionDetailResponse struct {
+	ID        string                   `json:"id"`
+	Title     string                   `json:"title"`
+	CreatedAt string                   `json:"created_at"`
+	UpdatedAt string                   `json:"updated_at"`
+	Messages  []sessionMessageResponse `json:"messages"`
+}
+
+type sessionMessageResponse struct {
+	Role       string                    `json:"role"`
+	Content    string                    `json:"content,omitempty"`
+	ToolCalls  []sessionToolCallResponse `json:"tool_calls,omitempty"`
+	ToolCallID string                    `json:"tool_call_id,omitempty"`
+	Tool       string                    `json:"tool,omitempty"`
+}
+
+type sessionToolCallResponse struct {
+	ID        string          `json:"id"`
+	Tool      string          `json:"tool"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
 }
 
 type sessionsResponse struct {
@@ -78,6 +105,40 @@ func TestRouterServesHealthAndSessionRoutesThroughGin(t *testing.T) {
 	}
 	if len(runBody.Steps) != 1 || runBody.Steps[0].Tool != "calculator" || runBody.Steps[0].Result != "91" {
 		t.Fatalf("run steps = %#v, want calculator result", runBody.Steps)
+	}
+}
+
+func TestRouterReturnsSessionDetailWithStableMessageHistory(t *testing.T) {
+	handler := newTestRouter(t)
+	created := createSession(t, handler, "use calculator to compute 13 * 7")
+	run := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{
+		"input": "use calculator to compute 13 * 7",
+	})
+	assertStatus(t, run, http.StatusOK)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/sessions/"+created.ID, nil))
+
+	assertStatus(t, response, http.StatusOK)
+	detail := decodeJSON[sessionDetailResponse](t, response)
+	if detail.ID != created.ID || detail.Title != created.Title {
+		t.Fatalf("GET /v1/sessions/:id metadata = %#v, want id %q title %q", detail, created.ID, created.Title)
+	}
+	assertTimestamp(t, "created_at", detail.CreatedAt)
+	assertTimestamp(t, "updated_at", detail.UpdatedAt)
+	assertCalculatorTranscript(t, detail.Messages)
+}
+
+func TestRouterGetMissingSessionReturnsJSON404(t *testing.T) {
+	handler := newTestRouter(t)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/sessions/missing", nil))
+
+	assertStatus(t, response, http.StatusNotFound)
+	body := decodeJSON[errorResponse](t, response)
+	if !strings.Contains(body.Error, `session "missing" not found`) {
+		t.Fatalf("GET /v1/sessions/missing error = %#v, want missing session message", body)
 	}
 }
 
@@ -214,6 +275,59 @@ func assertSession(t *testing.T, got sessionResponse, wantTitle string) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, got.UpdatedAt); err != nil {
 		t.Fatalf("updated_at = %q, want RFC3339Nano: %v", got.UpdatedAt, err)
+	}
+}
+
+func assertTimestamp(t *testing.T, field string, value string) {
+	t.Helper()
+	if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+		t.Fatalf("%s = %q, want RFC3339Nano: %v", field, value, err)
+	}
+}
+
+func assertCalculatorTranscript(t *testing.T, messages []sessionMessageResponse) {
+	t.Helper()
+	if len(messages) != 4 {
+		t.Fatalf("messages len = %d, want 4 terminal messages: %#v", len(messages), messages)
+	}
+	user := messages[0]
+	if user.Role != "user" || user.Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("user message = %#v, want calculator prompt", user)
+	}
+	assistantToolCall := messages[1]
+	if assistantToolCall.Role != "assistant" || len(assistantToolCall.ToolCalls) != 1 {
+		t.Fatalf("assistant tool call message = %#v, want one calculator tool call", assistantToolCall)
+	}
+	call := assistantToolCall.ToolCalls[0]
+	if call.ID != "call_fake_calculator" || call.Tool != "calculator" {
+		t.Fatalf("tool call = %#v, want calculator call", call)
+	}
+	assertRawJSONEqual(t, call.Arguments, `{"a":13,"b":7,"op":"mul"}`)
+	toolResult := messages[2]
+	if toolResult.Role != "tool" || toolResult.ToolCallID != call.ID || toolResult.Tool != "calculator" || toolResult.Content != "91" {
+		t.Fatalf("tool result message = %#v, want calculator result 91 for call %q", toolResult, call.ID)
+	}
+	finalAssistant := messages[3]
+	if finalAssistant.Role != "assistant" || finalAssistant.Content != "13 * 7 = 91" || len(finalAssistant.ToolCalls) != 0 {
+		t.Fatalf("final assistant message = %#v, want final answer", finalAssistant)
+	}
+}
+
+func assertRawJSONEqual(t *testing.T, got json.RawMessage, want string) {
+	t.Helper()
+	if !json.Valid(got) {
+		t.Fatalf("JSON value = %q, want valid JSON", string(got))
+	}
+	var normalizedGot any
+	if err := json.Unmarshal(got, &normalizedGot); err != nil {
+		t.Fatalf("unmarshal JSON value %q: %v", string(got), err)
+	}
+	var normalizedWant any
+	if err := json.Unmarshal([]byte(want), &normalizedWant); err != nil {
+		t.Fatalf("unmarshal expected JSON %q: %v", want, err)
+	}
+	if !reflect.DeepEqual(normalizedGot, normalizedWant) {
+		t.Fatalf("JSON value = %#v, want %#v", normalizedGot, normalizedWant)
 	}
 }
 
