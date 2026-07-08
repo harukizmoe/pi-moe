@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	appservice "harukizmoe/pimoe/internal/application/service"
+	"harukizmoe/pimoe/internal/session"
 )
 
 // SessionService 描述 SessionHandler 需要的业务能力。
@@ -133,11 +134,11 @@ func (h *SessionHandler) List(ctx *gin.Context) {
 func (h *SessionHandler) Get(ctx *gin.Context) {
 	detail, err := h.service.Get(ctx.Request.Context(), ctx.Param("id"))
 	if err != nil {
-		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "not found") {
-			status = http.StatusNotFound
+		if session.IsNotFound(err) {
+			writeError(ctx, http.StatusNotFound, err.Error())
+			return
 		}
-		writeError(ctx, status, err.Error())
+		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
 	}
 	ctx.JSON(http.StatusOK, newSessionDetailResponse(detail))

@@ -137,8 +137,8 @@ func TestRouterGetMissingSessionReturnsJSON404(t *testing.T) {
 
 	assertStatus(t, response, http.StatusNotFound)
 	body := decodeJSON[errorResponse](t, response)
-	if !strings.Contains(body.Error, `session "missing" not found`) {
-		t.Fatalf("GET /v1/sessions/missing error = %#v, want missing session message", body)
+	if body.Error != `session "missing" not found` {
+		t.Fatalf("GET /v1/sessions/missing error = %#v, want exact missing session message", body)
 	}
 }
 

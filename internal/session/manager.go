@@ -39,6 +39,20 @@ type SessionMeta struct {
 	UpdatedAt time.Time
 }
 
+type notFoundError struct {
+	id string
+}
+
+func (e notFoundError) Error() string {
+	return fmt.Sprintf("session %q not found", e.id)
+}
+
+// IsNotFound 报告 err 是否表示本地索引中不存在指定 session id。
+func IsNotFound(err error) bool {
+	var target notFoundError
+	return errors.As(err, &target)
+}
+
 type sessionIndex struct {
 	Current  string             `json:"current,omitempty"`
 	Sessions []sessionMetaEntry `json:"sessions"`
@@ -109,7 +123,7 @@ func (m *Manager) Resolve(ctx context.Context, id string) (SessionMeta, error) {
 			return meta.toSessionMeta(), nil
 		}
 	}
-	return SessionMeta{}, fmt.Errorf("session %q not found", id)
+	return SessionMeta{}, notFoundError{id: id}
 }
 
 // List 按 updated_at 倒序返回 session 列表。
