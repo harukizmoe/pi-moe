@@ -192,6 +192,41 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingAPIKeyEnvWithoutS
 	}
 }
 
+func TestSessionServiceCurrentProviderDiagnosticsReportsMissingBaseURL(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("TEST_PROVIDER_KEY", "test-secret-value")
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store: appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		ProviderConfigPath: writeProvidersConfigContent(t, `llms:
+  default_provider: test-openai
+  providers:
+    test-openai:
+      type: openai_compatible
+      api_key_env: TEST_PROVIDER_KEY
+      model: gpt-test
+`),
+		ProviderName: "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	got, err := svc.CurrentProviderDiagnostics(ctx)
+	if err != nil {
+		t.Fatalf("CurrentProviderDiagnostics() error = %v", err)
+	}
+	want := appservice.ProviderDiagnostics{
+		Name:  "test-openai",
+		Type:  "openai_compatible",
+		Model: "gpt-test",
+		Ready: false,
+		Error: "openai-compatible base_url is required",
+	}
+	if got != want {
+		t.Fatalf("CurrentProviderDiagnostics() = %#v, want %#v", got, want)
+	}
+}
+
 func TestSessionServiceCurrentProviderDiagnosticsReportsUnknownProviderType(t *testing.T) {
 	ctx := context.Background()
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{

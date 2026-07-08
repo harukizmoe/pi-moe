@@ -153,6 +153,11 @@ func (s *SessionService) CurrentProviderDiagnostics(ctx context.Context) (Provid
 	switch providerConfig.Type {
 	case "fake":
 	case "openai_compatible":
+		if strings.TrimSpace(providerConfig.BaseURL) == "" {
+			diagnostics.Ready = false
+			diagnostics.Error = "openai-compatible base_url is required"
+			break
+		}
 		if strings.TrimSpace(providerConfig.APIKey) == "" {
 			diagnostics.Ready = false
 			if strings.TrimSpace(providerConfig.APIKeyEnv) == "" {
