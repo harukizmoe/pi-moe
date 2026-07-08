@@ -18,6 +18,7 @@ type SessionService interface {
 	List(ctx context.Context) ([]appservice.SessionMeta, error)
 	Run(ctx context.Context, sessionID string, input string) (appservice.RunResult, error)
 	Stream(ctx context.Context, sessionID string, input string) (<-chan appservice.StreamEvent, error)
+	CurrentProviderDiagnostics(ctx context.Context) (appservice.ProviderDiagnostics, error)
 }
 
 // SessionHandler 处理 session 相关 HTTP 请求。
@@ -60,6 +61,16 @@ type toolStepResponse struct {
 	Arguments json.RawMessage `json:"arguments"`
 	Result    string          `json:"result"`
 	Error     string          `json:"error,omitempty"`
+}
+
+// CurrentProvider 返回当前 Provider 的本地配置诊断信息。
+func (h *SessionHandler) CurrentProvider(ctx *gin.Context) {
+	diagnostics, err := h.service.CurrentProviderDiagnostics(ctx.Request.Context())
+	if err != nil {
+		writeError(ctx, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ctx.JSON(http.StatusOK, diagnostics)
 }
 
 // Create 创建一个 managed session。

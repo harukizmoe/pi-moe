@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"harukizmoe/pimoe/internal/application/data"
+	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
@@ -62,6 +63,20 @@ type StreamEvent struct {
 	Data any
 }
 
+// ProviderDiagnostics 描述当前 HTTP 服务选中的 Provider 配置健康状态。
+type ProviderDiagnostics struct {
+	// Name 是配置文件中的 Provider 实例名。
+	Name string `json:"name"`
+	// Type 是 Provider 实现类型，例如 fake 或 openai_compatible。
+	Type string `json:"type"`
+	// Model 是请求 Provider 时使用的模型名。
+	Model string `json:"model"`
+	// Ready 表示本地配置是否足以发起 Provider 调用。
+	Ready bool `json:"ready"`
+	// Error 是不可用原因；Ready 为 true 时为空。
+	Error string `json:"error"`
+}
+
 type streamDeltaData struct {
 	Content string `json:"content"`
 }
@@ -103,6 +118,54 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 			Logger:             cfg.Logger,
 		},
 	}, nil
+}
+
+// CurrentProviderDiagnostics 返回当前选中 Provider 的本地配置健康状态。
+func (s *SessionService) CurrentProviderDiagnostics(ctx context.Context) (ProviderDiagnostics, error) {
+	if s == nil {
+		return ProviderDiagnostics{}, fmt.Errorf("session service is nil")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return ProviderDiagnostics{}, err
+		}
+	}
+
+	loaded, err := appconfig.Load(s.config.ProviderConfigPath)
+	if err != nil {
+		return ProviderDiagnostics{}, err
+	}
+	providerName := s.config.ProviderName
+	if providerName == "" {
+		providerName = loaded.LLMs.DefaultProvider
+	}
+	providerConfig, ok := loaded.LLMs.Providers[providerName]
+	if !ok {
+		return ProviderDiagnostics{}, fmt.Errorf("unknown provider %q", providerName)
+	}
+
+	diagnostics := ProviderDiagnostics{
+		Name:  providerName,
+		Type:  providerConfig.Type,
+		Model: providerConfig.Model,
+		Ready: true,
+	}
+	switch providerConfig.Type {
+	case "fake":
+	case "openai_compatible":
+		if strings.TrimSpace(providerConfig.APIKey) == "" {
+			diagnostics.Ready = false
+			if strings.TrimSpace(providerConfig.APIKeyEnv) == "" {
+				diagnostics.Error = "api_key_env is not configured"
+			} else {
+				diagnostics.Error = fmt.Sprintf("environment variable %s is not set", providerConfig.APIKeyEnv)
+			}
+		}
+	default:
+		diagnostics.Ready = false
+		diagnostics.Error = fmt.Sprintf("unknown llm provider type %q", providerConfig.Type)
+	}
+	return diagnostics, nil
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。

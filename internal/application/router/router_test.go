@@ -39,6 +39,14 @@ type toolStepResponse struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+type providerDiagnosticsResponse struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Model string `json:"model"`
+	Ready bool   `json:"ready"`
+	Error string `json:"error"`
+}
+
 func TestRouterServesHealthAndSessionRoutesThroughGin(t *testing.T) {
 	handler := newTestRouter(t)
 
@@ -124,6 +132,26 @@ func TestRouterStreamsValidationErrorsAsSSE(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("SSE body missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestRouterReturnsCurrentProviderDiagnostics(t *testing.T) {
+	handler := newTestRouter(t)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/providers/current", nil))
+
+	assertStatus(t, response, http.StatusOK)
+	got := decodeJSON[providerDiagnosticsResponse](t, response)
+	want := providerDiagnosticsResponse{
+		Name:  "fake",
+		Type:  "fake",
+		Model: "fake-tool-model",
+		Ready: true,
+		Error: "",
+	}
+	if got != want {
+		t.Fatalf("GET /v1/providers/current = %#v, want %#v", got, want)
 	}
 }
 

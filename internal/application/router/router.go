@@ -23,6 +23,7 @@ func New(cfg Config) *gin.Engine {
 	v1 := r.Group("/v1")
 	{
 		v1.GET("/health", healthHandler.Health)
+		v1.GET("/providers/current", sessionHandler.CurrentProvider)
 		v1.POST("/sessions", sessionHandler.Create)
 		v1.GET("/sessions", sessionHandler.List)
 		v1.POST("/sessions/:id/runs", sessionHandler.Run)
