@@ -39,7 +39,7 @@ type SessionService struct {
 
 	// sessionRunLocks 按 session ID 串行化会推进 transcript leaf 的 Run/Stream。
 	sessionRunLocksMu sync.Mutex
-	sessionRunLocks   map[string]*sync.Mutex
+	sessionRunLocks   map[string]chan struct{}
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
@@ -198,7 +198,7 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 			MaxSteps:           cfg.MaxSteps,
 		},
 		basePrompt:      strings.TrimSpace(cfg.BaseSystemPrompt),
-		sessionRunLocks: make(map[string]*sync.Mutex),
+		sessionRunLocks: make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -297,17 +297,22 @@ func firstCreateOptions(opts []CreateOptions) CreateOptions {
 	return opts[0]
 }
 
-func (s *SessionService) lockSessionRun(sessionID string) func() {
+func (s *SessionService) lockSessionRun(ctx context.Context, sessionID string) (func(), error) {
 	s.sessionRunLocksMu.Lock()
 	lock := s.sessionRunLocks[sessionID]
 	if lock == nil {
-		lock = &sync.Mutex{}
+		lock = make(chan struct{}, 1)
+		lock <- struct{}{}
 		s.sessionRunLocks[sessionID] = lock
 	}
 	s.sessionRunLocksMu.Unlock()
 
-	lock.Lock()
-	return lock.Unlock
+	select {
+	case <-lock:
+		return func() { lock <- struct{}{} }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
@@ -418,7 +423,10 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return RunResult{}, err
 	}
-	unlock := s.lockSessionRun(meta.ID)
+	unlock, err := s.lockSessionRun(ctx, meta.ID)
+	if err != nil {
+		return RunResult{}, err
+	}
 	defer unlock()
 	meta, err = s.manager.Resolve(ctx, meta.ID)
 	if err != nil {
@@ -454,7 +462,10 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	if err != nil {
 		return nil, err
 	}
-	unlock := s.lockSessionRun(meta.ID)
+	unlock, err := s.lockSessionRun(ctx, meta.ID)
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
 		if unlock != nil {
 			unlock()

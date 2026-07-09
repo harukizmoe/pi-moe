@@ -28,6 +28,29 @@ func TestSessionServiceUnknownSessionDoesNotRetainRunLock(t *testing.T) {
 	}
 }
 
+func TestSessionServiceLockSessionRunHonorsCanceledContext(t *testing.T) {
+	svc, err := NewSessionService(SessionConfig{
+		SessionRoot:        filepath.Join(t.TempDir(), "sessions"),
+		ProviderConfigPath: writeLockTestProvidersConfig(t),
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	unlock, err := svc.lockSessionRun(context.Background(), "session-a")
+	if err != nil {
+		t.Fatalf("lockSessionRun() first error = %v", err)
+	}
+	defer unlock()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := svc.lockSessionRun(canceled, "session-a"); err == nil {
+		t.Fatal("lockSessionRun() error = nil, want context cancellation")
+	}
+}
+
 func writeLockTestProvidersConfig(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "providers.yaml")
