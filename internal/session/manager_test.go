@@ -17,7 +17,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := NewManager(root)
 
-	first, err := manager.Create(context.Background(), "  first prompt\nwith second line  ", SessionConfig{})
+	first, err := manager.Create(context.Background(), LocalActor(), "  first prompt\nwith second line  ", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
@@ -37,7 +37,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 		t.Fatalf("index.json stat error = %v", err)
 	}
 
-	second, err := manager.Create(context.Background(), "second prompt", SessionConfig{})
+	second, err := manager.Create(context.Background(), LocalActor(), "second prompt", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}
@@ -45,7 +45,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 		t.Fatalf("Create() produced duplicate id %q", first.ID)
 	}
 
-	resolved, err := manager.Resolve(context.Background(), first.ID)
+	resolved, err := manager.Resolve(context.Background(), LocalActor(), first.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -54,10 +54,10 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 	}
 
 	time.Sleep(time.Millisecond)
-	if err := manager.Touch(context.Background(), first.ID); err != nil {
+	if err := manager.Touch(context.Background(), LocalActor(), first.ID); err != nil {
 		t.Fatalf("Touch() error = %v", err)
 	}
-	listed, err := manager.List(context.Background())
+	listed, err := manager.List(context.Background(), LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -83,7 +83,7 @@ func TestManagerConcurrentCreatesKeepAllEntries(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			meta, err := manager.Create(context.Background(), fmt.Sprintf("prompt %03d", i), SessionConfig{})
+			meta, err := manager.Create(context.Background(), LocalActor(), fmt.Sprintf("prompt %03d", i), SessionConfig{})
 			if err != nil {
 				errs <- err
 				return
@@ -108,7 +108,7 @@ func TestManagerConcurrentCreatesKeepAllEntries(t *testing.T) {
 		t.Fatalf("created unique ids = %d, want %d", len(created), count)
 	}
 
-	listed, err := manager.List(context.Background())
+	listed, err := manager.List(context.Background(), LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -130,7 +130,7 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 	cfg := SessionConfig{ProviderName: "deepseek", SessionPrompt: "be concise", MaxSteps: 4}
 
-	created, err := manager.Create(context.Background(), "prompt", cfg)
+	created, err := manager.Create(context.Background(), LocalActor(), "prompt", cfg)
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -138,7 +138,7 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 		t.Fatalf("Create() Config = %#v, want %#v", created.Config, cfg)
 	}
 
-	resolved, err := manager.Resolve(context.Background(), created.ID)
+	resolved, err := manager.Resolve(context.Background(), LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -158,7 +158,7 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	}
 	assertOnlySessionConfigFields(t, indexBytes)
 
-	listed, err := manager.List(context.Background())
+	listed, err := manager.List(context.Background(), LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -195,17 +195,17 @@ func assertOnlySessionConfigFields(t *testing.T, indexBytes []byte) {
 
 func TestManagerUpdateConfigPersistsPreferenceAndTouchesSession(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
-	created, err := manager.Create(context.Background(), "prompt", SessionConfig{ProviderName: "old"})
+	created, err := manager.Create(context.Background(), LocalActor(), "prompt", SessionConfig{ProviderName: "old"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	time.Sleep(time.Millisecond)
 	updatedCfg := SessionConfig{ProviderName: "new", SessionPrompt: "keep", MaxSteps: 2}
 
-	if err := manager.UpdateConfig(context.Background(), created.ID, updatedCfg); err != nil {
+	if err := manager.UpdateConfig(context.Background(), LocalActor(), created.ID, updatedCfg); err != nil {
 		t.Fatalf("UpdateConfig() error = %v", err)
 	}
-	resolved, err := manager.Resolve(context.Background(), created.ID)
+	resolved, err := manager.Resolve(context.Background(), LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestManagerReadsLegacyIndexWithoutConfig(t *testing.T) {
 		t.Fatalf("write legacy index: %v", err)
 	}
 
-	meta, err := NewManager(root).Resolve(context.Background(), "legacy")
+	meta, err := NewManager(root).Resolve(context.Background(), LocalActor(), "legacy")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -240,7 +240,7 @@ func TestManagerReadsLegacyIndexWithoutConfig(t *testing.T) {
 func TestManagerCreateUsesUntitledSessionForBlankTitle(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	meta, err := manager.Create(context.Background(), " \n\t ", SessionConfig{})
+	meta, err := manager.Create(context.Background(), LocalActor(), " \n\t ", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -252,7 +252,7 @@ func TestManagerCreateUsesUntitledSessionForBlankTitle(t *testing.T) {
 func TestManagerResolveMissingSessionReturnsError(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	_, err := manager.Resolve(context.Background(), "missing-session")
+	_, err := manager.Resolve(context.Background(), LocalActor(), "missing-session")
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want missing session error")
 	}
@@ -264,7 +264,7 @@ func TestManagerResolveMissingSessionReturnsError(t *testing.T) {
 func TestManagerListMissingIndexReturnsEmptyList(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	metas, err := manager.List(context.Background())
+	metas, err := manager.List(context.Background(), LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -283,7 +283,7 @@ func TestManagerMalformedIndexReturnsPathError(t *testing.T) {
 		t.Fatalf("write malformed index: %v", err)
 	}
 
-	_, err := NewManager(root).List(context.Background())
+	_, err := NewManager(root).List(context.Background(), LocalActor())
 	if err == nil {
 		t.Fatal("List() error = nil, want malformed index error")
 	}
@@ -295,7 +295,7 @@ func TestManagerMalformedIndexReturnsPathError(t *testing.T) {
 func TestManagerTouchMissingSessionReturnsError(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	err := manager.Touch(context.Background(), "missing-session")
+	err := manager.Touch(context.Background(), LocalActor(), "missing-session")
 	if err == nil {
 		t.Fatal("Touch() error = nil, want missing session error")
 	}
@@ -307,11 +307,117 @@ func TestManagerTouchMissingSessionReturnsError(t *testing.T) {
 func TestManagerTimestampsAreUTC(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	meta, err := manager.Create(context.Background(), "prompt", SessionConfig{})
+	meta, err := manager.Create(context.Background(), LocalActor(), "prompt", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	if meta.CreatedAt.Location() != time.UTC || meta.UpdatedAt.Location() != time.UTC {
 		t.Fatalf("timestamps locations = %v / %v, want UTC", meta.CreatedAt.Location(), meta.UpdatedAt.Location())
+	}
+}
+
+func TestManagerCreateResolveListFiltersByOwner(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
+	alice := Actor{UserID: "alice"}
+	bob := Actor{UserID: "bob"}
+
+	aliceSession, err := manager.Create(context.Background(), alice, "alice prompt", SessionConfig{ProviderName: "fake"})
+	if err != nil {
+		t.Fatalf("Create() alice error = %v", err)
+	}
+	bobSession, err := manager.Create(context.Background(), bob, "bob prompt", SessionConfig{})
+	if err != nil {
+		t.Fatalf("Create() bob error = %v", err)
+	}
+	if aliceSession.OwnerID != "alice" {
+		t.Fatalf("alice OwnerID = %q, want alice", aliceSession.OwnerID)
+	}
+	if bobSession.OwnerID != "bob" {
+		t.Fatalf("bob OwnerID = %q, want bob", bobSession.OwnerID)
+	}
+
+	resolved, err := manager.Resolve(context.Background(), alice, aliceSession.ID)
+	if err != nil {
+		t.Fatalf("Resolve() alice error = %v", err)
+	}
+	if resolved.ID != aliceSession.ID || resolved.OwnerID != "alice" {
+		t.Fatalf("Resolve() = %#v, want alice session", resolved)
+	}
+	if _, err := manager.Resolve(context.Background(), bob, aliceSession.ID); !IsNotFound(err) {
+		t.Fatalf("Resolve() bob on alice err = %v, want not found", err)
+	}
+
+	aliceList, err := manager.List(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("List() alice error = %v", err)
+	}
+	if len(aliceList) != 1 || aliceList[0].ID != aliceSession.ID {
+		t.Fatalf("List() alice = %#v, want only alice session", aliceList)
+	}
+	bobList, err := manager.List(context.Background(), bob)
+	if err != nil {
+		t.Fatalf("List() bob error = %v", err)
+	}
+	if len(bobList) != 1 || bobList[0].ID != bobSession.ID {
+		t.Fatalf("List() bob = %#v, want only bob session", bobList)
+	}
+}
+
+func TestManagerOwnerMismatchCannotTouchOrUpdateConfig(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
+	alice := Actor{UserID: "alice"}
+	bob := Actor{UserID: "bob"}
+	created, err := manager.Create(context.Background(), alice, "prompt", SessionConfig{ProviderName: "old"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if err := manager.Touch(context.Background(), bob, created.ID); !IsNotFound(err) {
+		t.Fatalf("Touch() owner mismatch err = %v, want not found", err)
+	}
+	if err := manager.UpdateConfig(context.Background(), bob, created.ID, SessionConfig{ProviderName: "new"}); !IsNotFound(err) {
+		t.Fatalf("UpdateConfig() owner mismatch err = %v, want not found", err)
+	}
+
+	resolved, err := manager.Resolve(context.Background(), alice, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() after rejected writes error = %v", err)
+	}
+	if resolved.Config.ProviderName != "old" {
+		t.Fatalf("ProviderName = %q, want old", resolved.Config.ProviderName)
+	}
+}
+
+func TestManagerReadsLegacyEmptyOwnerAsLocal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	indexJSON := `{
+  "current": "sess-legacy",
+  "sessions": [
+    {
+      "id": "sess-legacy",
+      "path": "` + filepath.ToSlash(filepath.Join(root, "sess-legacy.jsonl")) + `",
+      "title": "legacy prompt",
+      "created_at": "2026-07-09T00:00:00Z",
+      "updated_at": "2026-07-09T00:00:00Z"
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(root, "index.json"), []byte(indexJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile(index) error = %v", err)
+	}
+	manager := NewManager(root)
+
+	resolved, err := manager.Resolve(context.Background(), LocalActor(), "sess-legacy")
+	if err != nil {
+		t.Fatalf("Resolve() legacy local error = %v", err)
+	}
+	if resolved.OwnerID != LocalActor().UserID {
+		t.Fatalf("legacy OwnerID = %q, want local", resolved.OwnerID)
+	}
+	if _, err := manager.Resolve(context.Background(), Actor{UserID: "alice"}, "sess-legacy"); !IsNotFound(err) {
+		t.Fatalf("Resolve() non-local legacy err = %v, want not found", err)
 	}
 }
