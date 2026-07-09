@@ -210,6 +210,9 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		runProvider := strings.TrimSpace(opts.providerName)
 		if runProvider == "" {
 			runProvider = meta.Config.ProviderName
+			if err := ensureCLIStoredProviderConfigured(opts.configPath, meta.ID, runProvider); err != nil {
+				return nil, nil, err
+			}
 		}
 		cfg.ProviderName = runProvider
 		if opts.maxSteps > 0 {
@@ -246,6 +249,21 @@ func newCLIManagedSessionConfig(opts cliOptions) (session.SessionConfig, error) 
 	}
 	cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
 	return cfg, nil
+}
+
+func ensureCLIStoredProviderConfigured(configPath, sessionID, providerName string) error {
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return nil
+	}
+	loaded, err := appconfig.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := loaded.LLMs.Providers[providerName]; ok {
+		return nil
+	}
+	return fmt.Errorf("session %q provider %q is not configured; specify --provider to choose another provider", sessionID, providerName)
 }
 
 func touchManagedSession(ctx context.Context, managed *cliManagedSession) error {

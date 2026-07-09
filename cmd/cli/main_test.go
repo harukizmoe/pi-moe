@@ -450,7 +450,6 @@ func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
 	}
 }
 
-
 func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
 	ctx := context.Background()
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
@@ -515,6 +514,33 @@ func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *te
 	}
 	if resolved.Config.ProviderName != "fake-local" {
 		t.Fatalf("persisted ProviderName = %q, want fake-local", resolved.Config.ProviderName)
+	}
+}
+
+func TestResumeCLISessionReportsMissingStoredProviderWithOverrideGuidance(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "removed-provider"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	opts := cliOptions{configPath: providerConfigPath, resumeSessionID: created.ID, promptArgs: []string{"hello"}}
+	_, _, err = newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err == nil {
+		t.Fatal("newCLISessionWithRoot() error = nil, want missing stored provider error")
+	}
+	want := `session "` + created.ID + `" provider "removed-provider" is not configured; specify --provider to choose another provider`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
 }
 
