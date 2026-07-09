@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	appdata "harukizmoe/pimoe/internal/application/data"
 	appservice "harukizmoe/pimoe/internal/application/service"
@@ -234,6 +236,8 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
       model: fake-tool-model
     fake-alt:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: broken-default-model
 `)
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath})
@@ -257,6 +261,8 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
       model: fake-tool-model
     fake-alt:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: broken-default-model
 `), 0o600); err != nil {
 		t.Fatalf("rewrite providers config: %v", err)
@@ -278,6 +284,8 @@ func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(
   providers:
     fake-old:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: bad
     fake-new:
       type: fake
@@ -316,6 +324,8 @@ func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSucce
   providers:
     fake-old:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: bad
     fake-new:
       type: fake
@@ -436,6 +446,158 @@ func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 		t.Fatalf("Get() error = %v", err)
 	}
 	assertServiceResumedTranscript(t, detail.Messages)
+}
+
+func TestSessionServiceConcurrentRunOnSameSessionKeepsBothTurns(t *testing.T) {
+	ctx := context.Background()
+	server, arrivals, releaseRuns := newBlockingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "concurrent run")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	results := make(chan runOutcome, 2)
+	runPrompt := func(prompt string) {
+		result, err := svc.Run(ctx, created.ID, prompt)
+		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
+	}
+
+	go runPrompt("first concurrent prompt")
+	if got := receivePromptArrival(t, arrivals); got != "first concurrent prompt" {
+		t.Fatalf("first provider prompt = %q, want first concurrent prompt", got)
+	}
+
+	go runPrompt("second concurrent prompt")
+	secondArrivedBeforeRelease := false
+	select {
+	case got := <-arrivals:
+		secondArrivedBeforeRelease = true
+		if got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+	}
+	releaseRuns()
+	if !secondArrivedBeforeRelease {
+		if got := receivePromptArrival(t, arrivals); got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	}
+
+	wantAnswers := map[string]string{
+		"first concurrent prompt":  "first concurrent answer",
+		"second concurrent prompt": "second concurrent answer",
+	}
+	for range wantAnswers {
+		select {
+		case outcome := <-results:
+			if outcome.err != nil {
+				t.Fatalf("Run(%q) error = %v", outcome.prompt, outcome.err)
+			}
+			if outcome.answer != wantAnswers[outcome.prompt] {
+				t.Fatalf("Run(%q) Answer = %q, want %q", outcome.prompt, outcome.answer, wantAnswers[outcome.prompt])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Run results")
+		}
+	}
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(detail.Messages) != 4 {
+		t.Fatalf("Get() Messages len = %d, want both user/assistant turns: %#v", len(detail.Messages), detail.Messages)
+	}
+	gotTurns := map[string]string{}
+	for i := 0; i < len(detail.Messages); i += 2 {
+		user := detail.Messages[i]
+		assistant := detail.Messages[i+1]
+		if user.Role != "user" || assistant.Role != "assistant" {
+			t.Fatalf("messages[%d:%d] = %#v, %#v; want user then assistant", i, i+2, user, assistant)
+		}
+		gotTurns[user.Content] = assistant.Content
+	}
+	for prompt, answer := range wantAnswers {
+		if gotTurns[prompt] != answer {
+			t.Fatalf("persisted turn for %q = %q, want %q in %#v", prompt, gotTurns[prompt], answer, detail.Messages)
+		}
+	}
+}
+
+func TestSessionServiceConcurrentRunOnDifferentSessionsDoesNotBlock(t *testing.T) {
+	ctx := context.Background()
+	server, arrivals, releaseRuns := newBlockingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	firstSession, err := svc.Create(ctx, "first concurrent run")
+	if err != nil {
+		t.Fatalf("first Create() error = %v", err)
+	}
+	secondSession, err := svc.Create(ctx, "second concurrent run")
+	if err != nil {
+		t.Fatalf("second Create() error = %v", err)
+	}
+
+	results := make(chan runOutcome, 2)
+	runPrompt := func(sessionID string, prompt string) {
+		result, err := svc.Run(ctx, sessionID, prompt)
+		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
+	}
+
+	go runPrompt(firstSession.ID, "first concurrent prompt")
+	if got := receivePromptArrival(t, arrivals); got != "first concurrent prompt" {
+		t.Fatalf("first provider prompt = %q, want first concurrent prompt", got)
+	}
+
+	go runPrompt(secondSession.ID, "second concurrent prompt")
+	select {
+	case got := <-arrivals:
+		if got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("different session run blocked behind active session")
+	}
+	releaseRuns()
+
+	wantAnswers := map[string]string{
+		"first concurrent prompt":  "first concurrent answer",
+		"second concurrent prompt": "second concurrent answer",
+	}
+	for range wantAnswers {
+		select {
+		case outcome := <-results:
+			if outcome.err != nil {
+				t.Fatalf("Run(%q) error = %v", outcome.prompt, outcome.err)
+			}
+			if outcome.answer != wantAnswers[outcome.prompt] {
+				t.Fatalf("Run(%q) Answer = %q, want %q", outcome.prompt, outcome.answer, wantAnswers[outcome.prompt])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Run results")
+		}
+	}
 }
 
 func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
@@ -591,6 +753,65 @@ type capturedOpenAIChatMessage struct {
 	Content string `json:"content,omitempty"`
 }
 
+type runOutcome struct {
+	prompt string
+	answer string
+	err    error
+}
+
+func newBlockingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan string, func()) {
+	t.Helper()
+	arrivals := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRuns := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(releaseRuns)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var captured capturedOpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode OpenAI-compatible request: %v", err)
+		}
+		prompt := lastUserPrompt(captured.Messages)
+		arrivals <- prompt
+		<-release
+		answer := strings.Replace(prompt, " prompt", " answer", 1)
+		writeServiceOpenAISSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, answer),
+			`{"choices":[{"finish_reason":"stop"}]}`,
+		)
+	}))
+	return server, arrivals, releaseRuns
+}
+
+func lastUserPrompt(messages []capturedOpenAIChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
+func receivePromptArrival(t *testing.T, arrivals <-chan string) string {
+	t.Helper()
+	select {
+	case prompt := <-arrivals:
+		return prompt
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for provider request")
+		return ""
+	}
+}
 func newCapturingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan capturedOpenAIChatRequest) {
 	t.Helper()
 	requests := make(chan capturedOpenAIChatRequest, 1)
@@ -623,6 +844,7 @@ func writeOpenAICompatibleProvidersConfig(t *testing.T, baseURL string) string {
     test-openai:
       type: openai_compatible
       base_url: %q
+      api_key_env: TEST_PROVIDER_KEY
       model: test-model
       timeout_seconds: 1
 `, baseURL))
@@ -825,7 +1047,7 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingAPIKeyEnvWithoutS
 	}
 }
 
-func TestSessionServiceCurrentProviderDiagnosticsReportsMissingBaseURL(t *testing.T) {
+func TestSessionServiceCurrentProviderDiagnosticsReturnsConfigErrorForMissingBaseURL(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("TEST_PROVIDER_KEY", "test-secret-value")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
@@ -844,19 +1066,9 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingBaseURL(t *testin
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	got, err := svc.CurrentProviderDiagnostics(ctx)
-	if err != nil {
-		t.Fatalf("CurrentProviderDiagnostics() error = %v", err)
-	}
-	want := appservice.ProviderDiagnostics{
-		Name:  "test-openai",
-		Type:  "openai_compatible",
-		Model: "gpt-test",
-		Ready: false,
-		Error: "openai-compatible base_url is required",
-	}
-	if got != want {
-		t.Fatalf("CurrentProviderDiagnostics() = %#v, want %#v", got, want)
+	_, err = svc.CurrentProviderDiagnostics(ctx)
+	if err == nil || !strings.Contains(err.Error(), `provider "test-openai" openai_compatible base_url is required`) {
+		t.Fatalf("CurrentProviderDiagnostics() error = %v, want missing base_url config error", err)
 	}
 }
 
