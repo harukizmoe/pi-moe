@@ -189,7 +189,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 			return nil, nil, err
 		}
 		cfg.ProviderName = createCfg.ProviderName
-		cfg.SessionPrompt = createCfg.SystemPrompt
+		cfg.SessionPrompt = createCfg.SessionPrompt
 		cfg.MaxSteps = createCfg.MaxSteps
 		meta, err := manager.Create(ctx, title, createCfg)
 		if err != nil {
@@ -223,7 +223,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if systemPrompt := strings.TrimSpace(opts.systemPrompt); systemPrompt != "" {
 			cfg.SessionPrompt = systemPrompt
 		} else {
-			cfg.SessionPrompt = meta.Config.SystemPrompt
+			cfg.SessionPrompt = meta.Config.SessionPrompt
 		}
 		runner, err := session.Open(ctx, cfg, meta.Path)
 		if err != nil {
@@ -238,7 +238,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 func newCLIManagedSessionConfig(opts cliOptions) (session.SessionConfig, error) {
 	providerName := strings.TrimSpace(opts.providerName)
-	cfg := session.SessionConfig{SystemPrompt: strings.TrimSpace(opts.systemPrompt), MaxSteps: opts.maxSteps}
+	cfg := session.SessionConfig{SessionPrompt: strings.TrimSpace(opts.systemPrompt), MaxSteps: opts.maxSteps}
 	if providerName != "" {
 		cfg.ProviderName = providerName
 		return cfg, nil
@@ -285,7 +285,7 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 			cfg.MaxSteps = managed.maxStepsOverride
 		}
 		if systemPromptOverride != "" {
-			cfg.SystemPrompt = systemPromptOverride
+			cfg.SessionPrompt = systemPromptOverride
 		}
 		return managed.manager.UpdateConfig(ctx, managed.ID, cfg)
 	}

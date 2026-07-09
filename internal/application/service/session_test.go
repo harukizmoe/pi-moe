@@ -109,8 +109,8 @@ func TestSessionServiceRunAppliesStoredSystemPromptToProviderRequestWithoutPersi
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if created.Config.SystemPrompt != systemPrompt {
-		t.Fatalf("created SystemPrompt = %q, want stored prompt", created.Config.SystemPrompt)
+	if created.Config.SessionPrompt != systemPrompt {
+		t.Fatalf("created SessionPrompt = %q, want stored prompt", created.Config.SessionPrompt)
 	}
 
 	result, err := svc.Run(ctx, created.ID, "hello from managed run")
@@ -150,8 +150,8 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if created.Config.SystemPrompt != basePrompt {
-		t.Fatalf("created SystemPrompt = %q, want stored default prompt", created.Config.SystemPrompt)
+	if created.Config.SessionPrompt != basePrompt {
+		t.Fatalf("created SessionPrompt = %q, want stored default prompt", created.Config.SessionPrompt)
 	}
 
 	if _, err := svc.Run(ctx, created.ID, "hello from managed base"); err != nil {
@@ -180,8 +180,8 @@ func TestSessionServiceStreamAppliesStoredSystemPromptToProviderRequestWithoutPe
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if created.Config.SystemPrompt != systemPrompt {
-		t.Fatalf("created SystemPrompt = %q, want stored prompt", created.Config.SystemPrompt)
+	if created.Config.SessionPrompt != systemPrompt {
+		t.Fatalf("created SessionPrompt = %q, want stored prompt", created.Config.SessionPrompt)
 	}
 
 	events, err := svc.Stream(ctx, created.ID, "hello from managed stream")

@@ -613,8 +613,8 @@ func TestNewCLISessionPersistsManagedPreferenceFlags(t *testing.T) {
 	if meta.Config.MaxSteps != 2 {
 		t.Fatalf("persisted MaxSteps = %d, want 2", meta.Config.MaxSteps)
 	}
-	if meta.Config.SystemPrompt != "answer with only the final result" {
-		t.Fatalf("persisted SystemPrompt = %q, want flag value", meta.Config.SystemPrompt)
+	if meta.Config.SessionPrompt != "answer with only the final result" {
+		t.Fatalf("persisted SessionPrompt = %q, want flag value", meta.Config.SessionPrompt)
 	}
 	messages, err := session.LoadMessages(meta.Path)
 	if err != nil {
@@ -688,7 +688,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SystemPrompt: "stored prompt"})
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -723,8 +723,8 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 	if resolved.Config.MaxSteps != 2 {
 		t.Fatalf("persisted MaxSteps = %d, want override 2", resolved.Config.MaxSteps)
 	}
-	if resolved.Config.SystemPrompt != "override prompt" {
-		t.Fatalf("persisted SystemPrompt = %q, want override prompt", resolved.Config.SystemPrompt)
+	if resolved.Config.SessionPrompt != "override prompt" {
+		t.Fatalf("persisted SessionPrompt = %q, want override prompt", resolved.Config.SessionPrompt)
 	}
 }
 

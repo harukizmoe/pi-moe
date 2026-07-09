@@ -260,9 +260,9 @@ func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOp
 		}
 	}
 	cfg := session.SessionConfig{
-		ProviderName: strings.TrimSpace(s.config.ProviderName),
-		SystemPrompt: strings.TrimSpace(s.systemPrompt),
-		MaxSteps:     s.config.MaxSteps,
+		ProviderName:  strings.TrimSpace(s.config.ProviderName),
+		SessionPrompt: strings.TrimSpace(s.systemPrompt),
+		MaxSteps:      s.config.MaxSteps,
 	}
 	if providerName := strings.TrimSpace(opts.ProviderName); providerName != "" {
 		cfg.ProviderName = providerName
@@ -274,7 +274,7 @@ func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOp
 		cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
 	}
 	if systemPrompt := strings.TrimSpace(opts.SystemPrompt); systemPrompt != "" {
-		cfg.SystemPrompt = systemPrompt
+		cfg.SessionPrompt = systemPrompt
 	}
 	if opts.MaxSteps > 0 {
 		cfg.MaxSteps = opts.MaxSteps
@@ -316,7 +316,7 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 	if meta.Config.MaxSteps > 0 {
 		runCfg.MaxSteps = meta.Config.MaxSteps
 	}
-	if systemPrompt := strings.TrimSpace(meta.Config.SystemPrompt); systemPrompt != "" && systemPrompt != strings.TrimSpace(runCfg.BaseSystemPrompt) {
+	if systemPrompt := strings.TrimSpace(meta.Config.SessionPrompt); systemPrompt != "" && systemPrompt != strings.TrimSpace(runCfg.BaseSystemPrompt) {
 		runCfg.SessionPrompt = systemPrompt
 	}
 	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {

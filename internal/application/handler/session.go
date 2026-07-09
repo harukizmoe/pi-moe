@@ -82,7 +82,6 @@ type sessionConfigResponse struct {
 	HasSystemPrompt bool   `json:"has_system_prompt,omitempty"`
 }
 
-
 type runRequest struct {
 	Input        string `json:"input"`
 	ProviderName string `json:"provider_name"`
@@ -246,7 +245,7 @@ func newSessionConfigResponse(cfg session.SessionConfig) sessionConfigResponse {
 	return sessionConfigResponse{
 		ProviderName:    cfg.ProviderName,
 		MaxSteps:        cfg.MaxSteps,
-		HasSystemPrompt: strings.TrimSpace(cfg.SystemPrompt) != "",
+		HasSystemPrompt: strings.TrimSpace(cfg.SessionPrompt) != "",
 	}
 }
 
