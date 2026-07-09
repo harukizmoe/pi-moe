@@ -343,7 +343,7 @@ func validateOpenAIStreamToolCalls(toolCalls []openAIToolCall) error {
 		}
 		arguments := strings.TrimSpace(toolCall.Function.Arguments)
 		if arguments == "" {
-			continue
+			return fmt.Errorf("openai-compatible tool call arguments are not valid JSON at index %d", i)
 		}
 		if !json.Valid([]byte(arguments)) {
 			return fmt.Errorf("openai-compatible tool call arguments are not valid JSON at index %d", i)

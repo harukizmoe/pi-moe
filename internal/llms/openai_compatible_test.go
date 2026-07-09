@@ -681,6 +681,30 @@ func TestOpenAICompatibleProviderChatStreamRejectsInvalidFinalToolCalls(t *testi
 			wantMessage: "openai-compatible tool call arguments are not valid JSON",
 		},
 		{
+			name: "empty_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_empty","function":{"name":"calculator","arguments":""}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "whitespace_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_blank","function":{"name":"calculator","arguments":"   "}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "omitted_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_omitted","function":{"name":"calculator"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
 			name: "missing_id",
 			payloads: []string{
 				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"calculator","arguments":"{\"a\":13}"}}]}}]}`,
