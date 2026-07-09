@@ -87,6 +87,54 @@ func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
 	}
 }
 
+func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	created, err := svc.Create(ctx, "pin default provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.ProviderName != "fake-local" {
+		t.Fatalf("Create() ProviderName = %q, want resolved default fake-local", created.Config.ProviderName)
+	}
+
+	if err := os.WriteFile(configPath, []byte(`llms:
+  default_provider: fake-alt
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`), 0o600); err != nil {
+		t.Fatalf("rewrite providers config: %v", err)
+	}
+	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Run() after default_provider change error = %v", err)
+	}
+	if result.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run() Answer = %q, want pinned fake provider answer", result.Answer)
+	}
+}
+
+
 func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
 	ctx := context.Background()
 	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))

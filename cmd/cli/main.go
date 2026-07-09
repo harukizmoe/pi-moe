@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
@@ -170,7 +171,12 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 	manager := session.NewManager(sessionRoot)
 	if opts.newSession {
-		meta, err := manager.Create(ctx, title, session.SessionConfig{ProviderName: opts.providerName})
+		createCfg, err := newCLIManagedSessionConfig(opts.configPath, opts.providerName)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg.ProviderName = createCfg.ProviderName
+		meta, err := manager.Create(ctx, title, createCfg)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -200,6 +206,18 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 	runner, err := session.New(ctx, cfg)
 	return runner, nil, err
+}
+
+func newCLIManagedSessionConfig(configPath string, providerName string) (session.SessionConfig, error) {
+	providerName = strings.TrimSpace(providerName)
+	if providerName != "" {
+		return session.SessionConfig{ProviderName: providerName}, nil
+	}
+	loaded, err := appconfig.Load(configPath)
+	if err != nil {
+		return session.SessionConfig{}, err
+	}
+	return session.SessionConfig{ProviderName: strings.TrimSpace(loaded.LLMs.DefaultProvider)}, nil
 }
 
 func touchManagedSession(ctx context.Context, managed *cliManagedSession) error {

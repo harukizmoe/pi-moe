@@ -187,6 +187,61 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	assertConfigSummary(t, detailSession.Config, "fake-local", 4, true)
 }
 
+func TestRouterCreateAcceptsConfigOverridesWithoutExposingSystemPrompt(t *testing.T) {
+	configPath := writeRouterProvidersConfigContent(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: fake
+      model: fake-tool-model
+`)
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: configPath,
+		providerName:       "fake-local",
+	})
+
+	created := postJSON(t, handler, "/v1/sessions", map[string]any{
+		"input":         "hello",
+		"provider_name": "fake-alt",
+		"max_steps":     5,
+		"system_prompt": "private request system prompt",
+	})
+	assertStatus(t, created, http.StatusCreated)
+	createdBody := created.Body.String()
+	assertBodyContains(t, createdBody, `"provider_name":"fake-alt"`)
+	assertBodyContains(t, createdBody, `"max_steps":5`)
+	assertBodyContains(t, createdBody, `"has_system_prompt":true`)
+	assertBodyNotContains(t, createdBody, "private request system prompt")
+	assertBodyNotContains(t, createdBody, `"system_prompt":`)
+	createdSession := decodeJSONString[sessionResponse](t, createdBody)
+	assertConfigSummary(t, createdSession.Config, "fake-alt", 5, true)
+
+	listed := getJSON(t, handler, "/v1/sessions")
+	assertStatus(t, listed, http.StatusOK)
+	listedBody := listed.Body.String()
+	assertBodyContains(t, listedBody, `"provider_name":"fake-alt"`)
+	assertBodyNotContains(t, listedBody, "private request system prompt")
+	assertBodyNotContains(t, listedBody, `"system_prompt":`)
+	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
+	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
+		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
+	}
+	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-alt", 5, true)
+
+	detail := getJSON(t, handler, "/v1/sessions/"+createdSession.ID)
+	assertStatus(t, detail, http.StatusOK)
+	detailBody := detail.Body.String()
+	assertBodyContains(t, detailBody, `"provider_name":"fake-alt"`)
+	assertBodyNotContains(t, detailBody, "private request system prompt")
+	assertBodyNotContains(t, detailBody, `"system_prompt":`)
+	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
+	assertConfigSummary(t, detailSession.Config, "fake-alt", 5, true)
+}
+
 func TestRouterRunAcceptsProviderNameOverride(t *testing.T) {
 	handler := newTestRouterWithConfig(t, testRouterConfig{
 		root:               filepath.Join(t.TempDir(), "sessions"),

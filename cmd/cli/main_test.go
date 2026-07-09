@@ -392,6 +392,65 @@ func TestNewCLISessionStoresProviderPreference(t *testing.T) {
 	}
 }
 
+func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts := cliOptions{configPath: providerConfigPath, newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config.ProviderName != "fake-local" {
+		t.Fatalf("ProviderName = %q, want resolved default fake-local", meta.Config.ProviderName)
+	}
+
+	if err := os.WriteFile(providerConfigPath, []byte(`llms:
+  default_provider: fake-alt
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`), 0o600); err != nil {
+		t.Fatalf("rewrite providers config: %v", err)
+	}
+	resumeOpts := cliOptions{configPath: providerConfigPath, resumeSessionID: managed.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	resumedRunner, resumedManaged, err := newCLISessionWithRoot(ctx, resumeOpts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() resume error = %v", err)
+	}
+	if resumedRunner == nil || resumedManaged == nil {
+		t.Fatalf("resumed runner/managed = %#v/%#v, want managed session", resumedRunner, resumedManaged)
+	}
+	output, err := collectRunOutput(resumedRunner.Prompt(ctx, "use calculator to compute 13 * 7"))
+	if err != nil {
+		t.Fatalf("Prompt() after default_provider change error = %v", err)
+	}
+	if output.Answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want pinned fake provider answer", output.Answer)
+	}
+}
+
+
 func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
 	ctx := context.Background()
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:

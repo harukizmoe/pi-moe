@@ -15,7 +15,7 @@ import (
 
 // SessionService 描述 SessionHandler 需要的业务能力。
 type SessionService interface {
-	Create(ctx context.Context, title string) (appservice.SessionMeta, error)
+	Create(ctx context.Context, title string, opts ...appservice.CreateOptions) (appservice.SessionMeta, error)
 	List(ctx context.Context) ([]appservice.SessionMeta, error)
 	Get(ctx context.Context, sessionID string) (appservice.SessionDetail, error)
 	Run(ctx context.Context, sessionID string, input string, opts ...appservice.RunOptions) (appservice.RunResult, error)
@@ -34,8 +34,11 @@ func NewSessionHandler(service SessionService) *SessionHandler {
 }
 
 type createSessionRequest struct {
-	Input string `json:"input"`
-	Title string `json:"title"`
+	Input        string `json:"input"`
+	Title        string `json:"title"`
+	ProviderName string `json:"provider_name"`
+	MaxSteps     int    `json:"max_steps"`
+	SystemPrompt string `json:"system_prompt"`
 }
 
 type sessionResponse struct {
@@ -118,7 +121,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 	if title == "" {
 		title = strings.TrimSpace(req.Input)
 	}
-	meta, err := h.service.Create(ctx.Request.Context(), title)
+	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SystemPrompt: req.SystemPrompt})
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return

@@ -86,6 +86,17 @@ type RunOptions struct {
 	ProviderName string
 }
 
+// CreateOptions 保存创建 session 时可持久化的运行偏好覆盖。
+type CreateOptions struct {
+	// ProviderName 覆盖新 session 使用的 Provider；为空时使用服务配置或 llms.default_provider。
+	ProviderName string
+	// SystemPrompt 覆盖新 session 的行为设定；为空时使用服务配置。
+	SystemPrompt string
+	// MaxSteps 覆盖新 session 的 tool-calling 最大轮数；小于 1 时使用服务配置。
+	MaxSteps int
+}
+
+
 type providerSelectionError struct {
 	err error
 }
@@ -242,12 +253,33 @@ func (s *SessionService) CurrentProviderDiagnostics(ctx context.Context) (Provid
 	return diagnostics, nil
 }
 
-func (s *SessionService) defaultSessionConfig() session.SessionConfig {
-	return session.SessionConfig{
-		ProviderName:  s.config.ProviderName,
-		SystemPrompt:  s.systemPrompt,
-		MaxSteps:      s.config.MaxSteps,
+func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOptions) (session.SessionConfig, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return session.SessionConfig{}, err
+		}
 	}
+	cfg := session.SessionConfig{
+		ProviderName: strings.TrimSpace(s.config.ProviderName),
+		SystemPrompt: strings.TrimSpace(s.systemPrompt),
+		MaxSteps:     s.config.MaxSteps,
+	}
+	if providerName := strings.TrimSpace(opts.ProviderName); providerName != "" {
+		cfg.ProviderName = providerName
+	} else if cfg.ProviderName == "" {
+		loaded, err := appconfig.Load(s.config.ProviderConfigPath)
+		if err != nil {
+			return session.SessionConfig{}, err
+		}
+		cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
+	}
+	if systemPrompt := strings.TrimSpace(opts.SystemPrompt); systemPrompt != "" {
+		cfg.SystemPrompt = systemPrompt
+	}
+	if opts.MaxSteps > 0 {
+		cfg.MaxSteps = opts.MaxSteps
+	}
+	return cfg, nil
 }
 
 func firstRunOptions(opts []RunOptions) RunOptions {
@@ -256,6 +288,14 @@ func firstRunOptions(opts []RunOptions) RunOptions {
 	}
 	return opts[0]
 }
+
+func firstCreateOptions(opts []CreateOptions) CreateOptions {
+	if len(opts) == 0 {
+		return CreateOptions{}
+	}
+	return opts[0]
+}
+
 
 func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
 	if ctx != nil {
@@ -310,11 +350,15 @@ func (s *SessionService) persistRunSuccess(ctx context.Context, meta SessionMeta
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。
-func (s *SessionService) Create(ctx context.Context, title string) (SessionMeta, error) {
+func (s *SessionService) Create(ctx context.Context, title string, opts ...CreateOptions) (SessionMeta, error) {
 	if s == nil {
 		return SessionMeta{}, fmt.Errorf("session service is nil")
 	}
-	return s.store.Create(ctx, title, s.defaultSessionConfig())
+	cfg, err := s.defaultSessionConfig(ctx, firstCreateOptions(opts))
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	return s.store.Create(ctx, title, cfg)
 }
 
 // List 返回可恢复 sessions。
