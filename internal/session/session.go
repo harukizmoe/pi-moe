@@ -159,10 +159,7 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 		return
 	}
 	if !completed {
-		if err := s.persistMessagesFrom(baseLen); err != nil {
-			terminal := ErrorEvent{Error: err}
-			emitSessionTerminal(out, terminal)
-		}
+		s.discardMessagesFrom(baseLen)
 	}
 }
 

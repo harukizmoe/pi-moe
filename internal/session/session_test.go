@@ -437,15 +437,32 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 	}
 
 	messages := s.Messages()
-	if len(messages) != 3 {
-		t.Fatalf("Messages() len = %d, want 3 without dangling over-limit assistant: %#v", len(messages), messages)
+	if len(messages) != 0 {
+		t.Fatalf("Messages() len = %d, want 0 after failed run rollback: %#v", len(messages), messages)
 	}
-	assistantWithTool := messages[1].(agent.AssistantMessage)
-	if len(assistantWithTool.ToolCalls) != 1 {
-		t.Fatalf("first assistant tool calls len = %d, want 1", len(assistantWithTool.ToolCalls))
+}
+
+func TestSessionPromptDoesNotDurablyPersistFailedRunWithoutRunEnd(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.Calculator{})
+	provider := &maxStepLoopProvider{t: t}
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+	s := &Session{
+		agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1}),
+		store: newFileStore(sessionPath),
 	}
-	if _, ok := messages[2].(agent.ToolResultMessage); !ok {
-		t.Fatalf("Messages()[2] = %T, want ToolResultMessage", messages[2])
+
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "compute (2 + 3) * 4"))
+	if _, ok := events[len(events)-1].(ErrorEvent); !ok {
+		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+	}
+
+	reopenedMessages, err := LoadMessages(sessionPath)
+	if err != nil {
+		t.Fatalf("LoadMessages() error = %v", err)
+	}
+	if len(reopenedMessages) != 0 {
+		t.Fatalf("LoadMessages() len after failed run = %d, want 0: %#v", len(reopenedMessages), reopenedMessages)
 	}
 }
 
