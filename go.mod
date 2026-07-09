@@ -5,6 +5,9 @@ go 1.26.4
 require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/spf13/viper v1.21.0
+	gorm.io/driver/postgres v1.6.0
+	gorm.io/driver/sqlite v1.6.0
+	gorm.io/gorm v1.31.2
 )
 
 require (
@@ -51,7 +54,4 @@ require (
 	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorm.io/driver/postgres v1.6.0 // indirect
-	gorm.io/driver/sqlite v1.6.0 // indirect
-	gorm.io/gorm v1.31.2 // indirect
 )
