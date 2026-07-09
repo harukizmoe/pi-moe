@@ -232,13 +232,13 @@ func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req Ch
 func openAIStatusError(resp *http.Response) error {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOpenAIErrorBodyBytes))
 	if readErr != nil {
-		return fmt.Errorf("openai chat returned status %d and failed to read error body: %w", resp.StatusCode, readErr)
+		return fmt.Errorf("openai-compatible chat completions failed: status %d: read error body: %w", resp.StatusCode, readErr)
 	}
 	bodyText := strings.TrimSpace(string(body))
 	if bodyText == "" {
-		return fmt.Errorf("openai chat returned status %d", resp.StatusCode)
+		bodyText = "<empty body>"
 	}
-	return fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
+	return fmt.Errorf("openai-compatible chat completions failed: status %d: %s", resp.StatusCode, bodyText)
 }
 
 func openAIStreamResponseError(streamErr *openAIStreamError) error {

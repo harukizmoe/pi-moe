@@ -222,6 +222,77 @@ func TestOpenAICompatibleProviderStatusErrorIncludesBodyExcerpt(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleProviderStatusErrorsAreStableAndRedacted(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			name:       "json_body",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":{"message":"bad key"}}`,
+			want:       []string{"openai-compatible chat completions failed", "status 401", "bad key"},
+			wantAbsent: []string{"secret-token", "Authorization"},
+		},
+		{
+			name:       "plain_text_body",
+			statusCode: http.StatusTooManyRequests,
+			body:       "rate limited",
+			want:       []string{"openai-compatible chat completions failed", "status 429", "rate limited"},
+		},
+		{
+			name:       "empty_body",
+			statusCode: http.StatusInternalServerError,
+			body:       "",
+			want:       []string{"openai-compatible chat completions failed", "status 500", "<empty body>"},
+		},
+		{
+			name:       "long_body_is_truncated",
+			statusCode: http.StatusBadGateway,
+			body:       strings.Repeat("x", maxOpenAIErrorBodyBytes+50),
+			want:       []string{"openai-compatible chat completions failed", "status 502", strings.Repeat("x", maxOpenAIErrorBodyBytes)},
+			wantAbsent: []string{strings.Repeat("x", maxOpenAIErrorBodyBytes+1)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+					t.Fatalf("authorization = %q", got)
+				}
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, APIKey: "secret-token", TimeoutSeconds: 3})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+			}
+
+			_, err = CollectChat(context.Background(), provider, ChatRequest{})
+			if err == nil {
+				t.Fatal("CollectChat() error = nil")
+			}
+			errorText := err.Error()
+			for _, want := range tt.want {
+				if !strings.Contains(errorText, want) {
+					t.Fatalf("error %q missing %q", errorText, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(errorText, absent) {
+					t.Fatalf("error %q leaked %q", errorText, absent)
+				}
+			}
+		})
+	}
+}
+
 func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(t, w,
