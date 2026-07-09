@@ -11,4 +11,9 @@ type SessionStore interface {
 	Touch(ctx context.Context, actor Actor, id string) error
 }
 
+// NewNotFoundError 返回 session metadata store 使用的规范 not-found 错误。
+func NewNotFoundError(id string) error {
+	return notFoundError{id: id}
+}
+
 var _ SessionStore = (*Manager)(nil)

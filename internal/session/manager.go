@@ -95,7 +95,7 @@ func (e notFoundError) Error() string {
 	return fmt.Sprintf("session %q not found", e.id)
 }
 
-// IsNotFound 报告 err 是否表示本地索引中不存在指定 session id。
+// IsNotFound 报告 err 是否表示 session metadata store 中不存在指定 session id。
 func IsNotFound(err error) bool {
 	var target notFoundError
 	return errors.As(err, &target)
