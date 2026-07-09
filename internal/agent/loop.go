@@ -109,12 +109,6 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 			return
 		}
 
-		if len(assistantMessage.ToolCalls) > 0 && chatRound >= a.maxSteps {
-			a.logger.Error(ctx, "agent.max_steps.exceeded", "max_steps", a.maxSteps, "tool_calls", len(assistantMessage.ToolCalls))
-			emit(ErrorEvent{RunID: runID, Error: fmt.Errorf("agent max steps exceeded after %d tool-calling rounds", a.maxSteps)})
-			return
-		}
-
 		if len(assistantMessage.ToolCalls) == 0 {
 			messages = append(messages, assistantMessage)
 			a.logger.Info(ctx, "agent.run.done", "answer", assistantMessage.Content)
