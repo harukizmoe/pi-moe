@@ -146,8 +146,9 @@ func validateCLIOptions(opts cliOptions) error {
 }
 
 type cliManagedSession struct {
-	manager *session.Manager
-	ID      string
+	manager          *session.Manager
+	ID               string
+	providerOverride string
 }
 
 // newCLISession 根据 session 选项创建内存、显式 JSONL 或 manager-managed Session。
@@ -169,7 +170,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 	manager := session.NewManager(sessionRoot)
 	if opts.newSession {
-		meta, err := manager.Create(ctx, title)
+		meta, err := manager.Create(ctx, title, session.SessionConfig{ProviderName: opts.providerName})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -177,7 +178,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName}, nil
 	}
 
 	if strings.TrimSpace(opts.resumeSessionID) != "" {
@@ -185,11 +186,16 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
+		runProvider := strings.TrimSpace(opts.providerName)
+		if runProvider == "" {
+			runProvider = meta.Config.ProviderName
+		}
+		cfg.ProviderName = runProvider
 		runner, err := session.Open(ctx, cfg, meta.Path)
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName}, nil
 	}
 
 	runner, err := session.New(ctx, cfg)
@@ -199,6 +205,16 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 func touchManagedSession(ctx context.Context, managed *cliManagedSession) error {
 	if managed == nil {
 		return nil
+	}
+	providerOverride := strings.TrimSpace(managed.providerOverride)
+	if providerOverride != "" {
+		meta, err := managed.manager.Resolve(ctx, managed.ID)
+		if err != nil {
+			return err
+		}
+		cfg := meta.Config
+		cfg.ProviderName = providerOverride
+		return managed.manager.UpdateConfig(ctx, managed.ID, cfg)
 	}
 	return managed.manager.Touch(ctx, managed.ID)
 }

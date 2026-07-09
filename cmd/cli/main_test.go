@@ -365,6 +365,100 @@ func TestCLIManagedSessionNewAndResumeReuseTranscript(t *testing.T) {
 	}
 }
 
+func TestNewCLISessionStoresProviderPreference(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config.ProviderName != "fake-local" {
+		t.Fatalf("ProviderName = %q, want fake-local", meta.Config.ProviderName)
+	}
+}
+
+func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	opts := cliOptions{configPath: providerConfigPath, resumeSessionID: created.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	output, err := collectRunOutput(runner.Prompt(ctx, "use calculator to compute 13 * 7"))
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if output.Answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want 13 * 7 = 91", output.Answer)
+	}
+}
+
+func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "missing"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	opts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", resumeSessionID: created.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() override error = %v", err)
+	}
+	if _, err := collectRunOutput(runner.Prompt(ctx, "use calculator to compute 13 * 7")); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() error = %v", err)
+	}
+	resolved, err := manager.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-local" {
+		t.Fatalf("persisted ProviderName = %q, want fake-local", resolved.Config.ProviderName)
+	}
+}
+
 func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	ctx := context.Background()
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
@@ -466,11 +560,11 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)
-	first, err := manager.Create(context.Background(), "first prompt")
+	first, err := manager.Create(context.Background(), "first prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
-	second, err := manager.Create(context.Background(), "second prompt")
+	second, err := manager.Create(context.Background(), "second prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}

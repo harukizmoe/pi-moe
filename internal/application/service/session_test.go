@@ -11,6 +11,7 @@ import (
 
 	appdata "harukizmoe/pimoe/internal/application/data"
 	appservice "harukizmoe/pimoe/internal/application/service"
+	"harukizmoe/pimoe/internal/session"
 )
 
 func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
@@ -61,6 +62,160 @@ func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
 	step := result.ToolSteps[0]
 	if step.ToolName != "calculator" || step.Arguments != `{"a":13,"b":7,"op":"mul"}` || step.Result != "91" {
 		t.Fatalf("Run() ToolSteps[0] = %#v, want calculator args/result", step)
+	}
+}
+
+func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+		MaxSteps:           3,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	created, err := svc.Create(ctx, "prompt")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.ProviderName != "fake-local" || created.Config.MaxSteps != 3 {
+		t.Fatalf("Create() Config = %#v, want provider fake-local and max_steps 3", created.Config)
+	}
+}
+
+func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-old:
+      type: openai_compatible
+      model: bad
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "switch provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	if err != nil {
+		t.Fatalf("Run() override error = %v", err)
+	}
+	if result.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run() Answer = %q, want calculator answer", result.Answer)
+	}
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-new" {
+		t.Fatalf("persisted ProviderName = %q, want fake-new", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-old:
+      type: openai_compatible
+      model: bad
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "stream switch provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	events, err := svc.Stream(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	if err != nil {
+		t.Fatalf("Stream() override error = %v", err)
+	}
+	got := collectStreamEvents(t, events)
+	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "13 * 7 = 91"})
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-new" {
+		t.Fatalf("persisted ProviderName = %q, want fake-new", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFailure(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-old
+  providers:
+    fake-old:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "failed provider switch")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, err = svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "missing-provider"})
+	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("Run() error = %v, want unknown provider error", err)
+	}
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-old" {
+		t.Fatalf("persisted ProviderName = %q, want fake-old after failed run", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-new
+  providers:
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	creator, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "missing-provider"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := creator.Create(ctx, "missing provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, err = creator.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	if err == nil || !strings.Contains(err.Error(), `session "`+created.ID+`" provider "missing-provider" is not configured; specify provider_name to choose another provider`) {
+		t.Fatalf("Run() error = %v, want actionable missing provider error", err)
 	}
 }
 
@@ -213,7 +368,7 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "sessions")
 	store := appdata.NewManagerSessionStore(root)
-	created, err := store.Create(ctx, "malformed tool args")
+	created, err := store.Create(ctx, "malformed tool args", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}

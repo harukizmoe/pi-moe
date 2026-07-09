@@ -17,11 +17,18 @@ import (
 	appservice "harukizmoe/pimoe/internal/application/service"
 )
 
+type sessionConfigResponse struct {
+	ProviderName    string `json:"provider_name"`
+	MaxSteps        int    `json:"max_steps"`
+	HasSystemPrompt bool   `json:"has_system_prompt"`
+}
+
 type sessionResponse struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	Config   sessionConfigResponse `json:"config"`
 }
 
 type sessionDetailResponse struct {
@@ -29,6 +36,7 @@ type sessionDetailResponse struct {
 	Title     string                   `json:"title"`
 	CreatedAt string                   `json:"created_at"`
 	UpdatedAt string                   `json:"updated_at"`
+	Config   sessionConfigResponse `json:"config"`
 	Messages  []sessionMessageResponse `json:"messages"`
 }
 
@@ -127,6 +135,136 @@ func TestRouterReturnsSessionDetailWithStableMessageHistory(t *testing.T) {
 	assertTimestamp(t, "created_at", detail.CreatedAt)
 	assertTimestamp(t, "updated_at", detail.UpdatedAt)
 	assertCalculatorTranscript(t, detail.Messages)
+}
+
+func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
+	configPath := writeRouterProvidersConfigContent(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+      timeout_seconds: 1
+`)
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: configPath,
+		providerName:       "fake-local",
+		systemPrompt:       "private system prompt",
+		maxSteps:           4,
+	})
+
+	created := postJSON(t, handler, "/v1/sessions", map[string]string{"input": "hello", "title": "hello"})
+	assertStatus(t, created, http.StatusCreated)
+	createdBody := created.Body.String()
+	assertBodyContains(t, createdBody, `"config":{"provider_name":"fake-local"`)
+	assertBodyContains(t, createdBody, `"max_steps":4`)
+	assertBodyContains(t, createdBody, `"has_system_prompt":true`)
+	assertBodyNotContains(t, createdBody, "private system prompt")
+	assertBodyNotContains(t, createdBody, `"system_prompt":`)
+	createdSession := decodeJSONString[sessionResponse](t, createdBody)
+	assertConfigSummary(t, createdSession.Config, "fake-local", 4, true)
+
+	listed := getJSON(t, handler, "/v1/sessions")
+	assertStatus(t, listed, http.StatusOK)
+	listedBody := listed.Body.String()
+	assertBodyContains(t, listedBody, `"config":{"provider_name":"fake-local"`)
+	assertBodyNotContains(t, listedBody, "private system prompt")
+	assertBodyNotContains(t, listedBody, `"system_prompt":`)
+	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
+	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
+		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
+	}
+	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-local", 4, true)
+
+	detail := getJSON(t, handler, "/v1/sessions/"+createdSession.ID)
+	assertStatus(t, detail, http.StatusOK)
+	detailBody := detail.Body.String()
+	assertBodyContains(t, detailBody, `"config":{"provider_name":"fake-local"`)
+	assertBodyNotContains(t, detailBody, "private system prompt")
+	assertBodyNotContains(t, detailBody, `"system_prompt":`)
+	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
+	assertConfigSummary(t, detailSession.Config, "fake-local", 4, true)
+}
+
+func TestRouterRunAcceptsProviderNameOverride(t *testing.T) {
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: writeRouterSwitchableProvidersConfig(t),
+		providerName:       "fake-local",
+	})
+	created := createSession(t, handler, "switch")
+
+	run := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{
+		"input":         "use calculator to compute 13 * 7",
+		"provider_name": "fake-alt",
+	})
+	assertStatus(t, run, http.StatusOK)
+
+	detail := decodeJSON[sessionDetailResponse](t, getJSON(t, handler, "/v1/sessions/"+created.ID))
+	assertConfigSummary(t, detail.Config, "fake-alt", 0, false)
+}
+
+func TestRouterStreamAcceptsProviderNameOverride(t *testing.T) {
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: writeRouterSwitchableProvidersConfig(t),
+		providerName:       "fake-local",
+	})
+	created := createSession(t, handler, "stream switch")
+
+	stream := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs/stream", map[string]string{
+		"input":         "use calculator to compute 13 * 7",
+		"provider_name": "fake-alt",
+	})
+	assertStatus(t, stream, http.StatusOK)
+	assertBodyContains(t, stream.Body.String(), "event:done")
+
+	detail := decodeJSON[sessionDetailResponse](t, getJSON(t, handler, "/v1/sessions/"+created.ID))
+	assertConfigSummary(t, detail.Config, "fake-alt", 0, false)
+}
+
+func TestRouterRunProviderSelectionErrorReturnsBadRequest(t *testing.T) {
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: writeRouterSwitchableProvidersConfig(t),
+		providerName:       "fake-local",
+	})
+	created := createSession(t, handler, "missing provider")
+
+	run := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs", map[string]string{
+		"input":         "use calculator to compute 13 * 7",
+		"provider_name": "missing-provider",
+	})
+
+	assertStatus(t, run, http.StatusBadRequest)
+	body := decodeJSON[errorResponse](t, run)
+	if !strings.Contains(body.Error, `unknown provider "missing-provider"`) {
+		t.Fatalf("run error = %#v, want unknown provider message", body)
+	}
+}
+
+func TestRouterStreamProviderSelectionErrorReturnsSSEError(t *testing.T) {
+	handler := newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: writeRouterSwitchableProvidersConfig(t),
+		providerName:       "fake-local",
+	})
+	created := createSession(t, handler, "stream missing provider")
+
+	stream := postJSON(t, handler, "/v1/sessions/"+created.ID+"/runs/stream", map[string]string{
+		"input":         "use calculator to compute 13 * 7",
+		"provider_name": "missing-provider",
+	})
+
+	assertStatus(t, stream, http.StatusOK)
+	contentType := stream.Header().Get("Content-Type")
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	body := stream.Body.String()
+	assertBodyContains(t, body, "event:error")
+	assertBodyContains(t, body, `unknown provider \"missing-provider\"`)
 }
 
 func TestRouterRunsAppendToExistingSessionTranscript(t *testing.T) {
@@ -275,12 +413,40 @@ func TestRouterReturnsCurrentProviderDiagnostics(t *testing.T) {
 	}
 }
 
+type testRouterConfig struct {
+	root               string
+	providerConfigPath string
+	providerName       string
+	systemPrompt       string
+	maxSteps           int
+}
+
 func newTestRouter(t *testing.T) http.Handler {
 	t.Helper()
+	return newTestRouterWithConfig(t, testRouterConfig{
+		root:               filepath.Join(t.TempDir(), "sessions"),
+		providerConfigPath: writeRouterProvidersConfig(t),
+		providerName:       "fake",
+	})
+}
+
+func newTestRouterWithConfig(t *testing.T, cfg testRouterConfig) http.Handler {
+	t.Helper()
+	if cfg.root == "" {
+		cfg.root = filepath.Join(t.TempDir(), "sessions")
+	}
+	if cfg.providerConfigPath == "" {
+		cfg.providerConfigPath = writeRouterProvidersConfig(t)
+	}
+	if cfg.providerName == "" {
+		cfg.providerName = "fake"
+	}
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
-		ProviderConfigPath: writeRouterProvidersConfig(t),
-		ProviderName:       "fake",
+		Store:              appdata.NewManagerSessionStore(cfg.root),
+		ProviderConfigPath: cfg.providerConfigPath,
+		ProviderName:       cfg.providerName,
+		SystemPrompt:       cfg.systemPrompt,
+		MaxSteps:           cfg.maxSteps,
 	})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
@@ -308,11 +474,28 @@ func postJSON(t *testing.T, handler http.Handler, target string, body any) *http
 	return response
 }
 
+func getJSON(t *testing.T, handler http.Handler, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
 func decodeJSON[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	t.Helper()
 	var got T
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode JSON error = %v; body = %q", err, response.Body.String())
+	}
+	return got
+}
+
+func decodeJSONString[T any](t *testing.T, body string) T {
+	t.Helper()
+	var got T
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode JSON error = %v; body = %q", err, body)
 	}
 	return got
 }
@@ -334,6 +517,27 @@ func assertSession(t *testing.T, got sessionResponse, wantTitle string) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, got.UpdatedAt); err != nil {
 		t.Fatalf("updated_at = %q, want RFC3339Nano: %v", got.UpdatedAt, err)
+	}
+}
+
+func assertConfigSummary(t *testing.T, got sessionConfigResponse, wantProvider string, wantMaxSteps int, wantHasSystemPrompt bool) {
+	t.Helper()
+	if got.ProviderName != wantProvider || got.MaxSteps != wantMaxSteps || got.HasSystemPrompt != wantHasSystemPrompt {
+		t.Fatalf("config = %#v, want provider %q max_steps %d has_system_prompt %t", got, wantProvider, wantMaxSteps, wantHasSystemPrompt)
+	}
+}
+
+func assertBodyContains(t *testing.T, body string, want string) {
+	t.Helper()
+	if !strings.Contains(body, want) {
+		t.Fatalf("body missing %q in:\n%s", want, body)
+	}
+}
+
+func assertBodyNotContains(t *testing.T, body string, unwanted string) {
+	t.Helper()
+	if strings.Contains(body, unwanted) {
+		t.Fatalf("body contains private value %q in:\n%s", unwanted, body)
 	}
 }
 
@@ -392,15 +596,35 @@ func assertRawJSONEqual(t *testing.T, got json.RawMessage, want string) {
 
 func writeRouterProvidersConfig(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "providers.yaml")
-	content := `llms:
+	return writeRouterProvidersConfigContent(t, `llms:
   default_provider: fake
   providers:
     fake:
       type: fake
       model: fake-tool-model
       timeout_seconds: 1
-`
+`)
+}
+
+func writeRouterSwitchableProvidersConfig(t *testing.T) string {
+	t.Helper()
+	return writeRouterProvidersConfigContent(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+      timeout_seconds: 1
+    fake-alt:
+      type: fake
+      model: fake-tool-model
+      timeout_seconds: 1
+`)
+}
+
+func writeRouterProvidersConfigContent(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "providers.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write providers config: %v", err)
 	}
