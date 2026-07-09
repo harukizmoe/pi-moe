@@ -39,8 +39,8 @@ type Manager struct {
 type SessionConfig struct {
 	// ProviderName 引用项目级或未来用户级 Provider registry 中的 Provider 实例名。
 	ProviderName string `json:"provider_name,omitempty"`
-	// SystemPrompt 保存该 session 的 Agent 行为设定；空值表示使用当前默认值。
-	SystemPrompt string `json:"system_prompt,omitempty"`
+	// SessionPrompt 保存该 session 的 Agent 行为设定；空值表示使用当前默认值。
+	SessionPrompt string `json:"session_prompt,omitempty"`
 	// MaxSteps 保存 tool-calling 最大轮数偏好；小于 1 表示使用当前默认值。
 	MaxSteps int `json:"max_steps,omitempty"`
 }
@@ -81,11 +81,11 @@ type sessionIndex struct {
 }
 
 type sessionMetaEntry struct {
-	ID        string    `json:"id"`
-	Path      string    `json:"path"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string        `json:"id"`
+	Path      string        `json:"path"`
+	Title     string        `json:"title"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 	Config    SessionConfig `json:"config,omitempty"`
 }
 
@@ -264,7 +264,7 @@ func normalizeSessionTitle(title string) string {
 
 func normalizeSessionConfig(cfg SessionConfig) SessionConfig {
 	cfg.ProviderName = strings.TrimSpace(cfg.ProviderName)
-	cfg.SystemPrompt = strings.TrimSpace(cfg.SystemPrompt)
+	cfg.SessionPrompt = strings.TrimSpace(cfg.SessionPrompt)
 	if cfg.MaxSteps < 1 {
 		cfg.MaxSteps = 0
 	}

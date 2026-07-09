@@ -70,7 +70,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 
 func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
-	cfg := SessionConfig{ProviderName: "deepseek", SystemPrompt: "be concise", MaxSteps: 4}
+	cfg := SessionConfig{ProviderName: "deepseek", SessionPrompt: "be concise", MaxSteps: 4}
 
 	created, err := manager.Create(context.Background(), "prompt", cfg)
 	if err != nil {
@@ -86,6 +86,20 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	}
 	if !reflect.DeepEqual(resolved.Config, cfg) {
 		t.Fatalf("Resolve() Config = %#v, want %#v", resolved.Config, cfg)
+	}
+	if resolved.Config.SessionPrompt != "be concise" {
+		t.Fatalf("SessionPrompt = %q, want be concise", resolved.Config.SessionPrompt)
+	}
+	indexBytes, err := os.ReadFile(filepath.Join(manager.root, "index.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(index) error = %v", err)
+	}
+	indexJSON := string(indexBytes)
+	if !strings.Contains(indexJSON, `"session_prompt": "be concise"`) {
+		t.Fatalf("index JSON = %s, want session_prompt", indexJSON)
+	}
+	if strings.Contains(indexJSON, "system_prompt") {
+		t.Fatalf("index JSON = %s, must not contain system_prompt", indexJSON)
 	}
 
 	listed, err := manager.List(context.Background())
@@ -104,7 +118,7 @@ func TestManagerUpdateConfigPersistsPreferenceAndTouchesSession(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 	time.Sleep(time.Millisecond)
-	updatedCfg := SessionConfig{ProviderName: "new", SystemPrompt: "keep", MaxSteps: 2}
+	updatedCfg := SessionConfig{ProviderName: "new", SessionPrompt: "keep", MaxSteps: 2}
 
 	if err := manager.UpdateConfig(context.Background(), created.ID, updatedCfg); err != nil {
 		t.Fatalf("UpdateConfig() error = %v", err)
