@@ -106,20 +106,35 @@ func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
 	}
 }
 
-func TestParseCLIOptionsAcceptsInteractiveFlagWithoutSwallowingPromptArgs(t *testing.T) {
-	got, err := parseCLIOptions([]string{"--interactive", "use", "calculator"})
-	if err != nil {
-		t.Fatalf("parseCLIOptions() error = %v", err)
+func TestParseCLIOptionsValidatesInteractivePromptArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{name: "interactive alone", args: []string{"--interactive"}},
+		{name: "interactive with prompt args", args: []string{"--interactive", "hello"}, wantErr: true},
 	}
 
-	if !got.interactive {
-		t.Fatal("interactive = false, want true")
-	}
-	if strings.Join(got.promptArgs, " ") != "use calculator" {
-		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
-	}
-	if got.includeTrace {
-		t.Fatal("includeTrace = true, want false")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseCLIOptions(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseCLIOptions(%#v) error = nil, want validation error", tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCLIOptions(%#v) error = %v", tt.args, err)
+			}
+			if !got.interactive {
+				t.Fatal("interactive = false, want true")
+			}
+			if len(got.promptArgs) != 0 {
+				t.Fatalf("promptArgs = %#v, want empty", got.promptArgs)
+			}
+		})
 	}
 }
 
@@ -393,6 +408,43 @@ func TestNewCLISessionStoresProviderPreference(t *testing.T) {
 	}
 }
 
+func TestNewManagedSessionWithInvalidProviderDoesNotDirtySessionIndex(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--provider", "missing-provider",
+		"--new-session",
+		"hello",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	_, _, err = newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, strings.Join(opts.promptArgs, " "))
+	if err == nil {
+		t.Fatal("newCLISessionWithRoot() error = nil, want invalid provider error")
+	}
+	if !strings.Contains(err.Error(), "missing-provider") {
+		t.Fatalf("newCLISessionWithRoot() error = %q, want missing-provider", err.Error())
+	}
+
+	var output bytes.Buffer
+	if err := runListSessions(ctx, &output, root); err != nil {
+		t.Fatalf("runListSessions() error = %v", err)
+	}
+	if output.String() != "" {
+		t.Fatalf("runListSessions() output = %q, want empty after invalid provider", output.String())
+	}
+}
+
 func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
 	ctx := context.Background()
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
@@ -404,6 +456,8 @@ func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
     fake-alt:
       type: openai_compatible
       model: broken-default-model
+      base_url: http://127.0.0.1:1
+      api_key_env: PIMOE_TEST_API_KEY
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	opts := cliOptions{configPath: providerConfigPath, newSession: true, promptArgs: []string{"hello"}}
@@ -431,6 +485,8 @@ func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
     fake-alt:
       type: openai_compatible
       model: broken-default-model
+      base_url: http://127.0.0.1:1
+      api_key_env: PIMOE_TEST_API_KEY
 `), 0o600); err != nil {
 		t.Fatalf("rewrite providers config: %v", err)
 	}
