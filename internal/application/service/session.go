@@ -362,17 +362,17 @@ func ensureProviderConfigured(path string, providerName string) error {
 	return nil
 }
 
-func (s *SessionService) persistRunSuccess(ctx context.Context, meta SessionMeta, providerName string, override bool) error {
+func (s *SessionService) persistRunSuccess(ctx context.Context, actor session.Actor, meta SessionMeta, providerName string, override bool) error {
 	if override {
 		cfg := meta.Config
 		cfg.ProviderName = providerName
-		return s.manager.UpdateConfig(ctx, meta.ID, cfg)
+		return s.manager.UpdateConfig(ctx, actor, meta.ID, cfg)
 	}
-	return s.manager.Touch(ctx, meta.ID)
+	return s.manager.Touch(ctx, actor, meta.ID)
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。
-func (s *SessionService) Create(ctx context.Context, title string, opts ...CreateOptions) (SessionMeta, error) {
+func (s *SessionService) Create(ctx context.Context, actor session.Actor, title string, opts ...CreateOptions) (SessionMeta, error) {
 	if s == nil {
 		return SessionMeta{}, fmt.Errorf("session service is nil")
 	}
@@ -380,23 +380,23 @@ func (s *SessionService) Create(ctx context.Context, title string, opts ...Creat
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	return s.manager.Create(ctx, title, cfg)
+	return s.manager.Create(ctx, actor, title, cfg)
 }
 
 // List 返回可恢复 sessions。
-func (s *SessionService) List(ctx context.Context) ([]SessionMeta, error) {
+func (s *SessionService) List(ctx context.Context, actor session.Actor) ([]SessionMeta, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
-	return s.manager.List(ctx)
+	return s.manager.List(ctx, actor)
 }
 
 // Get 返回 session metadata 和当前可恢复 transcript。
-func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDetail, error) {
+func (s *SessionService) Get(ctx context.Context, actor session.Actor, sessionID string) (SessionDetail, error) {
 	if s == nil {
 		return SessionDetail{}, fmt.Errorf("session service is nil")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return SessionDetail{}, err
 	}
@@ -412,14 +412,14 @@ func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDeta
 }
 
 // Run 在指定 session 上执行一轮 prompt，并返回最终答案和工具步骤。
-func (s *SessionService) Run(ctx context.Context, sessionID string, input string, opts ...RunOptions) (RunResult, error) {
+func (s *SessionService) Run(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...RunOptions) (RunResult, error) {
 	if s == nil {
 		return RunResult{}, fmt.Errorf("session service is nil")
 	}
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -428,7 +428,7 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 		return RunResult{}, err
 	}
 	defer unlock()
-	meta, err = s.manager.Resolve(ctx, meta.ID)
+	meta, err = s.manager.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -444,21 +444,21 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return result, err
 	}
-	if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
+	if err := s.persistRunSuccess(ctx, actor, meta, providerName, override); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 // Stream 在指定 session 上执行一轮 prompt，并返回稳定的应用层流式事件。
-func (s *SessionService) Stream(ctx context.Context, sessionID string, input string, opts ...RunOptions) (<-chan StreamEvent, error) {
+func (s *SessionService) Stream(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...RunOptions) (<-chan StreamEvent, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 			unlock()
 		}
 	}()
-	meta, err = s.manager.Resolve(ctx, meta.ID)
+	meta, err = s.manager.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +488,7 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	streamUnlock := unlock
 	go func() {
 		defer streamUnlock()
-		s.forwardStreamEvents(ctx, meta, providerName, override, runner.Prompt(ctx, input), out)
+		s.forwardStreamEvents(ctx, actor, meta, providerName, override, runner.Prompt(ctx, input), out)
 	}()
 	unlock = nil
 	return out, nil
@@ -538,7 +538,7 @@ func stableRawJSON(value string) json.RawMessage {
 	return encoded
 }
 
-func (s *SessionService) forwardStreamEvents(ctx context.Context, meta SessionMeta, providerName string, override bool, events <-chan session.Event, out chan<- StreamEvent) {
+func (s *SessionService) forwardStreamEvents(ctx context.Context, actor session.Actor, meta SessionMeta, providerName string, override bool, events <-chan session.Event, out chan<- StreamEvent) {
 	defer close(out)
 	var answer string
 	for event := range events {
@@ -571,7 +571,7 @@ func (s *SessionService) forwardStreamEvents(ctx context.Context, meta SessionMe
 				answer = event.Message.Content
 			}
 		case session.RunEndEvent:
-			if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
+			if err := s.persistRunSuccess(ctx, actor, meta, providerName, override); err != nil {
 				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: err.Error()}})
 				return
 			}

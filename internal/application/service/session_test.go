@@ -30,7 +30,7 @@ func TestSessionServiceCreateListAndRunUsesSessionManager(t *testing.T) {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	created, err := svc.Create(ctx, "use calculator to compute 13 * 7")
+	created, err := svc.Create(ctx, session.LocalActor(), "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -44,7 +44,7 @@ func TestSessionServiceCreateListAndRunUsesSessionManager(t *testing.T) {
 		t.Fatalf("Create() Path dir = %q, want %q", filepath.Dir(created.Path), sessionRoot)
 	}
 
-	listed, err := svc.List(ctx)
+	listed, err := svc.List(ctx, session.LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -52,7 +52,7 @@ func TestSessionServiceCreateListAndRunUsesSessionManager(t *testing.T) {
 		t.Fatalf("List() = %#v, want created session", listed)
 	}
 
-	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	result, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	created, err := svc.Create(ctx, "prompt")
+	created, err := svc.Create(ctx, session.LocalActor(), "prompt")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "managed run", appservice.CreateOptions{SessionPrompt: sessionPrompt})
+	created, err := svc.Create(ctx, session.LocalActor(), "managed run", appservice.CreateOptions{SessionPrompt: sessionPrompt})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -115,7 +115,7 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 		t.Fatalf("created SessionPrompt = %q, want stored session prompt", created.Config.SessionPrompt)
 	}
 
-	result, err := svc.Run(ctx, created.ID, "hello from managed run")
+	result, err := svc.Run(ctx, session.LocalActor(), created.ID, "hello from managed run")
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -126,7 +126,7 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
 	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed run")
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -153,7 +153,7 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "managed base")
+	created, err := svc.Create(ctx, session.LocalActor(), "managed base")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -161,13 +161,13 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t
 		t.Fatalf("created SessionPrompt = %q, want no stored session prompt", created.Config.SessionPrompt)
 	}
 
-	if _, err := svc.Run(ctx, created.ID, "hello from managed base"); err != nil {
+	if _, err := svc.Run(ctx, session.LocalActor(), created.ID, "hello from managed base"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	captured := receiveOpenAIRequest(t, requests)
 	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, basePrompt, "hello from managed base")
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -194,7 +194,7 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "managed stream", appservice.CreateOptions{SessionPrompt: sessionPrompt})
+	created, err := svc.Create(ctx, session.LocalActor(), "managed stream", appservice.CreateOptions{SessionPrompt: sessionPrompt})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -202,7 +202,7 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 		t.Fatalf("created SessionPrompt = %q, want stored session prompt", created.Config.SessionPrompt)
 	}
 
-	events, err := svc.Stream(ctx, created.ID, "hello from managed stream")
+	events, err := svc.Stream(ctx, session.LocalActor(), created.ID, "hello from managed stream")
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
 	}
@@ -212,7 +212,7 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
 	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed stream")
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -243,7 +243,7 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	created, err := svc.Create(ctx, "pin default provider")
+	created, err := svc.Create(ctx, session.LocalActor(), "pin default provider")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -265,7 +265,7 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatalf("rewrite providers config: %v", err)
 	}
-	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	result, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Run() after default_provider change error = %v", err)
 	}
@@ -293,19 +293,19 @@ func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "switch provider")
+	created, err := svc.Create(ctx, session.LocalActor(), "switch provider")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	result, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
 	if err != nil {
 		t.Fatalf("Run() override error = %v", err)
 	}
 	if result.Answer != "13 * 7 = 91" {
 		t.Fatalf("Run() Answer = %q, want calculator answer", result.Answer)
 	}
-	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -333,18 +333,18 @@ func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSucce
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "stream switch provider")
+	created, err := svc.Create(ctx, session.LocalActor(), "stream switch provider")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	events, err := svc.Stream(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	events, err := svc.Stream(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
 	if err != nil {
 		t.Fatalf("Stream() override error = %v", err)
 	}
 	got := collectStreamEvents(t, events)
 	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "13 * 7 = 91"})
-	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -367,16 +367,16 @@ func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFai
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "failed provider switch")
+	created, err := svc.Create(ctx, session.LocalActor(), "failed provider switch")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	_, err = svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "missing-provider"})
+	_, err = svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "missing-provider"})
 	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
 		t.Fatalf("Run() error = %v, want unknown provider error", err)
 	}
-	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -399,12 +399,12 @@ func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testi
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := creator.Create(ctx, "missing provider")
+	created, err := creator.Create(ctx, session.LocalActor(), "missing provider")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	_, err = creator.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	_, err = creator.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7")
 	if err == nil || !strings.Contains(err.Error(), `session "`+created.ID+`" provider "missing-provider" is not configured; specify provider_name to choose another provider`) {
 		t.Fatalf("Run() error = %v, want actionable missing provider error", err)
 	}
@@ -421,25 +421,25 @@ func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "resume calculator")
+	created, err := svc.Create(ctx, session.LocalActor(), "resume calculator")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	first, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	first, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("first Run() error = %v", err)
 	}
 	if first.Answer != "13 * 7 = 91" {
 		t.Fatalf("first Run() Answer = %q, want 13 * 7 = 91", first.Answer)
 	}
-	second, err := svc.Run(ctx, created.ID, "what was the previous result?")
+	second, err := svc.Run(ctx, session.LocalActor(), created.ID, "what was the previous result?")
 	if err != nil {
 		t.Fatalf("second Run() error = %v", err)
 	}
 	if second.Answer != "previous result was 91" {
 		t.Fatalf("second Run() Answer = %q, want previous result was 91", second.Answer)
 	}
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -460,14 +460,14 @@ func TestSessionServiceConcurrentRunOnSameSessionKeepsBothTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "concurrent run")
+	created, err := svc.Create(ctx, session.LocalActor(), "concurrent run")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
 	results := make(chan runOutcome, 2)
 	runPrompt := func(prompt string) {
-		result, err := svc.Run(ctx, created.ID, prompt)
+		result, err := svc.Run(ctx, session.LocalActor(), created.ID, prompt)
 		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
 	}
 
@@ -511,7 +511,7 @@ func TestSessionServiceConcurrentRunOnSameSessionKeepsBothTurns(t *testing.T) {
 		}
 	}
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -548,18 +548,18 @@ func TestSessionServiceConcurrentRunOnDifferentSessionsDoesNotBlock(t *testing.T
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	firstSession, err := svc.Create(ctx, "first concurrent run")
+	firstSession, err := svc.Create(ctx, session.LocalActor(), "first concurrent run")
 	if err != nil {
 		t.Fatalf("first Create() error = %v", err)
 	}
-	secondSession, err := svc.Create(ctx, "second concurrent run")
+	secondSession, err := svc.Create(ctx, session.LocalActor(), "second concurrent run")
 	if err != nil {
 		t.Fatalf("second Create() error = %v", err)
 	}
 
 	results := make(chan runOutcome, 2)
 	runPrompt := func(sessionID string, prompt string) {
-		result, err := svc.Run(ctx, sessionID, prompt)
+		result, err := svc.Run(ctx, session.LocalActor(), sessionID, prompt)
 		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
 	}
 
@@ -610,14 +610,14 @@ func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	created, err := svc.Create(ctx, "use calculator to compute 13 * 7")
+	created, err := svc.Create(ctx, session.LocalActor(), "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+	if _, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	wantMetas, err := svc.List(ctx)
+	wantMetas, err := svc.List(ctx, session.LocalActor())
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -625,7 +625,7 @@ func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
 		t.Fatalf("List() len = %d, want 1: %#v", len(wantMetas), wantMetas)
 	}
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -673,11 +673,11 @@ func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testin
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
-	created, err := svc.Create(ctx, "use calculator to compute 13 * 7")
+	created, err := svc.Create(ctx, session.LocalActor(), "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7"); err != nil {
+	if _, err := svc.Run(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7"); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
@@ -697,7 +697,7 @@ func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testin
 		t.Fatalf("NewSessionService() with broken provider config error = %v", err)
 	}
 
-	detail, err := readOnlySvc.Get(ctx, created.ID)
+	detail, err := readOnlySvc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() with broken provider config error = %v", err)
 	}
@@ -710,7 +710,7 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "malformed tool args", session.SessionConfig{})
+	created, err := manager.Create(ctx, session.LocalActor(), "malformed tool args", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -728,7 +728,7 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	detail, err := svc.Get(ctx, created.ID)
+	detail, err := svc.Get(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -948,12 +948,12 @@ func TestSessionServiceStreamReturnsStableApplicationEvents(t *testing.T) {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	created, err := svc.Create(ctx, "stream calculator")
+	created, err := svc.Create(ctx, session.LocalActor(), "stream calculator")
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	events, err := svc.Stream(ctx, created.ID, "use calculator to compute 13 * 7")
+	events, err := svc.Stream(ctx, session.LocalActor(), created.ID, "use calculator to compute 13 * 7")
 	if err != nil {
 		t.Fatalf("Stream() error = %v", err)
 	}
@@ -1222,5 +1222,40 @@ func assertJSONEqual(t *testing.T, got any, want string) {
 	}
 	if !reflect.DeepEqual(normalizedGot, normalizedWant) {
 		t.Fatalf("JSON value = %#v, want %#v", normalizedGot, normalizedWant)
+	}
+}
+
+func TestSessionServiceRejectsDifferentOwner(t *testing.T) {
+	ctx := context.Background()
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		SessionRoot:        filepath.Join(t.TempDir(), "sessions"),
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	alice := session.Actor{UserID: "alice"}
+	bob := session.Actor{UserID: "bob"}
+
+	created, err := svc.Create(ctx, alice, "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.OwnerID != "alice" {
+		t.Fatalf("Create() OwnerID = %q, want alice", created.OwnerID)
+	}
+	if _, err := svc.Get(ctx, bob, created.ID); !session.IsNotFound(err) {
+		t.Fatalf("Get() bob err = %v, want not found", err)
+	}
+	if _, err := svc.Run(ctx, bob, created.ID, "hello"); !session.IsNotFound(err) {
+		t.Fatalf("Run() bob err = %v, want not found", err)
+	}
+	listed, err := svc.List(ctx, bob)
+	if err != nil {
+		t.Fatalf("List() bob error = %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("List() bob = %#v, want empty", listed)
 	}
 }

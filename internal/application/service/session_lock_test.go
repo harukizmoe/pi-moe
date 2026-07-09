@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"harukizmoe/pimoe/internal/session"
 )
 
 func TestSessionServiceUnknownSessionDoesNotRetainRunLock(t *testing.T) {
@@ -18,7 +20,7 @@ func TestSessionServiceUnknownSessionDoesNotRetainRunLock(t *testing.T) {
 	}
 
 	for _, id := range []string{"missing-a", "missing-b"} {
-		if _, err := svc.Run(context.Background(), id, "hello"); err == nil {
+		if _, err := svc.Run(context.Background(), session.LocalActor(), id, "hello"); err == nil {
 			t.Fatalf("Run(%q) error = nil, want missing session error", id)
 		}
 	}
