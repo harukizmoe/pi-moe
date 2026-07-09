@@ -414,10 +414,13 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	unlock := s.lockSessionRun(sessionID)
-	defer unlock()
-
 	meta, err := s.manager.Resolve(ctx, sessionID)
+	if err != nil {
+		return RunResult{}, err
+	}
+	unlock := s.lockSessionRun(meta.ID)
+	defer unlock()
+	meta, err = s.manager.Resolve(ctx, meta.ID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -447,14 +450,17 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input must not be empty")
 	}
-	unlock := s.lockSessionRun(sessionID)
+	meta, err := s.manager.Resolve(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	unlock := s.lockSessionRun(meta.ID)
 	defer func() {
 		if unlock != nil {
 			unlock()
 		}
 	}()
-
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err = s.manager.Resolve(ctx, meta.ID)
 	if err != nil {
 		return nil, err
 	}
