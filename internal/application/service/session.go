@@ -96,7 +96,6 @@ type CreateOptions struct {
 	MaxSteps int
 }
 
-
 type providerSelectionError struct {
 	err error
 }
@@ -193,7 +192,7 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
-			SystemPrompt:       strings.TrimSpace(cfg.SystemPrompt),
+			BaseSystemPrompt:   strings.TrimSpace(cfg.SystemPrompt),
 			Logger:             cfg.Logger,
 			MaxSteps:           cfg.MaxSteps,
 		},
@@ -297,7 +296,6 @@ func firstCreateOptions(opts []CreateOptions) CreateOptions {
 	return opts[0]
 }
 
-
 func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -318,8 +316,8 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 	if meta.Config.MaxSteps > 0 {
 		runCfg.MaxSteps = meta.Config.MaxSteps
 	}
-	if systemPrompt := strings.TrimSpace(meta.Config.SystemPrompt); systemPrompt != "" {
-		runCfg.SystemPrompt = systemPrompt
+	if systemPrompt := strings.TrimSpace(meta.Config.SystemPrompt); systemPrompt != "" && systemPrompt != strings.TrimSpace(runCfg.BaseSystemPrompt) {
+		runCfg.SessionPrompt = systemPrompt
 	}
 	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {
 		if meta.Config.ProviderName != "" && !override {

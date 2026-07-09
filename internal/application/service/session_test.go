@@ -121,13 +121,44 @@ func TestSessionServiceRunAppliesStoredSystemPromptToProviderRequestWithoutPersi
 		t.Fatalf("Run() Answer = %q, want managed answer", result.Answer)
 	}
 	captured := receiveOpenAIRequest(t, requests)
-	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, systemPrompt, "hello from managed run")
+	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, sessionPromptProviderContent(systemPrompt), "hello from managed run")
 
 	detail, err := svc.Get(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
 	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, systemPrompt, "hello from managed run")
+}
+
+func TestSessionServiceRunAppliesConfiguredBaseSystemPromptOnce(t *testing.T) {
+	ctx := context.Background()
+	basePrompt := "private service base prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+		SystemPrompt:       basePrompt,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed base")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SystemPrompt != basePrompt {
+		t.Fatalf("created SystemPrompt = %q, want stored default prompt", created.Config.SystemPrompt)
+	}
+
+	if _, err := svc.Run(ctx, created.ID, "hello from managed base"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	captured := receiveOpenAIRequest(t, requests)
+	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, basePrompt, "hello from managed base")
 }
 
 func TestSessionServiceStreamAppliesStoredSystemPromptToProviderRequestWithoutPersistingIt(t *testing.T) {
@@ -160,7 +191,7 @@ func TestSessionServiceStreamAppliesStoredSystemPromptToProviderRequestWithoutPe
 	got := collectStreamEvents(t, events)
 	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "managed answer"})
 	captured := receiveOpenAIRequest(t, requests)
-	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, systemPrompt, "hello from managed stream")
+	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, sessionPromptProviderContent(systemPrompt), "hello from managed stream")
 
 	detail, err := svc.Get(ctx, created.ID)
 	if err != nil {
@@ -168,7 +199,6 @@ func TestSessionServiceStreamAppliesStoredSystemPromptToProviderRequestWithoutPe
 	}
 	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, systemPrompt, "hello from managed stream")
 }
-
 
 func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 	ctx := context.Background()
@@ -216,7 +246,6 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 		t.Fatalf("Run() Answer = %q, want pinned fake provider answer", result.Answer)
 	}
 }
-
 
 func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
 	ctx := context.Background()
@@ -600,6 +629,10 @@ func receiveOpenAIRequest(t *testing.T, requests <-chan capturedOpenAIChatReques
 		t.Fatal("OpenAI-compatible server did not receive a chat completions request")
 		return capturedOpenAIChatRequest{}
 	}
+}
+
+func sessionPromptProviderContent(prompt string) string {
+	return "Session prompt:\n" + prompt
 }
 
 func assertProviderReceivedSystemPromptBeforeUser(t *testing.T, messages []capturedOpenAIChatMessage, systemPrompt string, userPrompt string) {

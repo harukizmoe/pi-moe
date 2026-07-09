@@ -173,7 +173,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 	cfg := session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
-		SystemPrompt:       strings.TrimSpace(opts.systemPrompt),
+		SessionPrompt:      strings.TrimSpace(opts.systemPrompt),
 		Logger:             appLogger,
 		MaxSteps:           opts.maxSteps,
 	}
@@ -189,7 +189,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 			return nil, nil, err
 		}
 		cfg.ProviderName = createCfg.ProviderName
-		cfg.SystemPrompt = createCfg.SystemPrompt
+		cfg.SessionPrompt = createCfg.SystemPrompt
 		cfg.MaxSteps = createCfg.MaxSteps
 		meta, err := manager.Create(ctx, title, createCfg)
 		if err != nil {
@@ -221,9 +221,9 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 			cfg.MaxSteps = meta.Config.MaxSteps
 		}
 		if systemPrompt := strings.TrimSpace(opts.systemPrompt); systemPrompt != "" {
-			cfg.SystemPrompt = systemPrompt
+			cfg.SessionPrompt = systemPrompt
 		} else {
-			cfg.SystemPrompt = meta.Config.SystemPrompt
+			cfg.SessionPrompt = meta.Config.SystemPrompt
 		}
 		runner, err := session.Open(ctx, cfg, meta.Path)
 		if err != nil {
