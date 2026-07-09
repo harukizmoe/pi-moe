@@ -11,15 +11,22 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
 	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
+	pgstore "harukizmoe/pimoe/internal/storage/postgres"
 )
 
 const (
 	agentLogPath                 = ".moe/logs/agent.log"
 	defaultCLIProviderConfigPath = "configs/providers.yaml"
 	defaultCLISessionRoot        = ".moe/sessions"
+	defaultCLISessionStore       = "file"
+	cliSessionStoreFile          = "file"
+	cliSessionStorePostgres      = "postgres"
 )
 
 func main() {
@@ -30,7 +37,16 @@ func main() {
 	}
 
 	if opts.listSessions {
-		if err := runListSessions(ctx, os.Stdout, defaultCLISessionRoot); err != nil {
+		store, closeStore, err := openCLISessionStore(ctx, opts, defaultCLISessionRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if err := closeStore(); err != nil {
+				log.Printf("close session store: %v", err)
+			}
+		}()
+		if err := runListSessionsWithStore(ctx, os.Stdout, store); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -45,9 +61,22 @@ func main() {
 			log.Printf("close logger: %v", err)
 		}
 	}()
+	var managedStore session.SessionStore
+	if cliNeedsManagedStore(opts) {
+		var closeManagedStore func() error
+		managedStore, closeManagedStore, err = openCLISessionStore(ctx, opts, defaultCLISessionRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if err := closeManagedStore(); err != nil {
+				log.Printf("close session store: %v", err)
+			}
+		}()
+	}
 
 	if opts.interactive {
-		runner, managed, err := newCLISessionWithRoot(ctx, opts, appLogger, defaultCLISessionRoot, "interactive session")
+		runner, managed, err := newCLISessionWithStore(ctx, opts, appLogger, managedStore, "interactive session")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -65,7 +94,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	runner, managed, err := newCLISessionWithRoot(ctx, opts, appLogger, defaultCLISessionRoot, input)
+	runner, managed, err := newCLISessionWithStore(ctx, opts, appLogger, managedStore, input)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -92,6 +121,10 @@ type cliOptions struct {
 	sessionPrompt string
 	// sessionPath 非空时启用 JSONL 会话恢复，空值保持一次性内存会话。
 	sessionPath string
+	// sessionStore 选择 managed session metadata store；默认 file。
+	sessionStore string
+	// postgresDSN 是 --session-store=postgres 使用的数据库连接串。
+	postgresDSN string
 	// newSession 表示创建 manager-managed session 并用本轮 prompt 作为标题来源。
 	newSession bool
 	// resumeSessionID 是从 manager index 恢复的 session id。
@@ -107,7 +140,7 @@ type cliOptions struct {
 }
 
 func parseCLIOptions(args []string) (cliOptions, error) {
-	opts := cliOptions{configPath: defaultCLIProviderConfigPath}
+	opts := cliOptions{configPath: defaultCLIProviderConfigPath, sessionStore: defaultCLISessionStore}
 	flags := flag.NewFlagSet("pimoe", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
@@ -120,6 +153,8 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.BoolVar(&opts.newSession, "new-session", false, "create a managed session")
 	flags.StringVar(&opts.resumeSessionID, "resume", "", "managed session id to resume")
 	flags.BoolVar(&opts.listSessions, "list-sessions", false, "list managed sessions")
+	flags.StringVar(&opts.sessionStore, "session-store", opts.sessionStore, "session metadata store: file or postgres")
+	flags.StringVar(&opts.postgresDSN, "postgres-dsn", "", "PostgreSQL DSN for --session-store postgres")
 
 	if err := flags.Parse(args); err != nil {
 		return cliOptions{}, fmt.Errorf("parse flags: %w", err)
@@ -132,8 +167,21 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 }
 
 func validateCLIOptions(opts cliOptions) error {
-	hasManualSession := strings.TrimSpace(opts.sessionPath) != ""
+	store := strings.ToLower(strings.TrimSpace(opts.sessionStore))
 	hasResume := strings.TrimSpace(opts.resumeSessionID) != ""
+	hasManualSession := strings.TrimSpace(opts.sessionPath) != ""
+	if store == "" {
+		store = defaultCLISessionStore
+	}
+	switch store {
+	case cliSessionStoreFile:
+	case cliSessionStorePostgres:
+		if strings.TrimSpace(opts.postgresDSN) == "" {
+			return fmt.Errorf("--postgres-dsn is required when --session-store=postgres")
+		}
+	default:
+		return fmt.Errorf("unknown session store %q; want file or postgres", store)
+	}
 
 	if hasManualSession && opts.newSession {
 		return fmt.Errorf("--session and --new-session are mutually exclusive")
@@ -158,8 +206,38 @@ func validateCLIOptions(opts cliOptions) error {
 	return nil
 }
 
+func cliNeedsManagedStore(opts cliOptions) bool {
+	return opts.listSessions || opts.newSession || strings.TrimSpace(opts.resumeSessionID) != ""
+}
+
+func openCLISessionStore(ctx context.Context, opts cliOptions, sessionRoot string) (session.SessionStore, func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	sessionStore := strings.ToLower(strings.TrimSpace(opts.sessionStore))
+	if sessionStore == "" {
+		sessionStore = defaultCLISessionStore
+	}
+	if sessionStore == cliSessionStoreFile {
+		return session.NewManager(sessionRoot), func() error { return nil }, nil
+	}
+
+	db, err := gorm.Open(postgres.Open(opts.postgresDSN), &gorm.Config{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres session store: %w", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres session store sql db: %w", err)
+	}
+	return pgstore.NewSessionStore(db, sessionRoot), sqlDB.Close, nil
+}
+
 type cliManagedSession struct {
-	manager               *session.Manager
+	store                 session.SessionStore
 	ID                    string
 	providerOverride      string
 	maxStepsOverride      int
@@ -173,6 +251,10 @@ func newCLISession(ctx context.Context, opts cliOptions, appLogger logger.Logger
 }
 
 func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logger.Logger, sessionRoot string, title string) (*session.Session, *cliManagedSession, error) {
+	return newCLISessionWithStore(ctx, opts, appLogger, session.NewManager(sessionRoot), title)
+}
+
+func newCLISessionWithStore(ctx context.Context, opts cliOptions, appLogger logger.Logger, store session.SessionStore, title string) (*session.Session, *cliManagedSession, error) {
 	cfg := session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
@@ -186,7 +268,9 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		return runner, nil, err
 	}
 
-	manager := session.NewManager(sessionRoot)
+	if cliNeedsManagedStore(opts) && store == nil {
+		return nil, nil, fmt.Errorf("session store is required for managed session operations")
+	}
 	actor := session.LocalActor()
 	if opts.newSession {
 		createCfg, err := newCLIManagedSessionConfig(opts)
@@ -199,7 +283,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if _, err := session.New(ctx, cfg); err != nil {
 			return nil, nil, err
 		}
-		meta, err := manager.Create(ctx, actor, title, createCfg)
+		meta, err := store.Create(ctx, actor, title, createCfg)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -207,11 +291,11 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
+		return runner, &cliManagedSession{store: store, ID: meta.ID}, nil
 	}
 
 	if strings.TrimSpace(opts.resumeSessionID) != "" {
-		meta, err := manager.Resolve(ctx, actor, opts.resumeSessionID)
+		meta, err := store.Resolve(ctx, actor, opts.resumeSessionID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -237,7 +321,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
+		return runner, &cliManagedSession{store: store, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
 	}
 
 	runner, err := session.New(ctx, cfg)
@@ -282,7 +366,7 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 	providerOverride := strings.TrimSpace(managed.providerOverride)
 	sessionPromptOverride := strings.TrimSpace(managed.sessionPromptOverride)
 	if providerOverride != "" || managed.maxStepsOverride > 0 || sessionPromptOverride != "" {
-		meta, err := managed.manager.Resolve(ctx, actor, managed.ID)
+		meta, err := managed.store.Resolve(ctx, actor, managed.ID)
 		if err != nil {
 			return err
 		}
@@ -296,9 +380,9 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 		if sessionPromptOverride != "" {
 			cfg.SessionPrompt = sessionPromptOverride
 		}
-		return managed.manager.UpdateConfig(ctx, actor, managed.ID, cfg)
+		return managed.store.UpdateConfig(ctx, actor, managed.ID, cfg)
 	}
-	return managed.manager.Touch(ctx, actor, managed.ID)
+	return managed.store.Touch(ctx, actor, managed.ID)
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {
@@ -406,7 +490,11 @@ func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 }
 
 func runListSessions(ctx context.Context, output io.Writer, root string) error {
-	metas, err := session.NewManager(root).List(ctx, session.LocalActor())
+	return runListSessionsWithStore(ctx, output, session.NewManager(root))
+}
+
+func runListSessionsWithStore(ctx context.Context, output io.Writer, store session.SessionStore) error {
+	metas, err := store.List(ctx, session.LocalActor())
 	if err != nil {
 		return err
 	}

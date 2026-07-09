@@ -8,16 +8,25 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	approuter "harukizmoe/pimoe/internal/application/router"
 	appservice "harukizmoe/pimoe/internal/application/service"
 	"harukizmoe/pimoe/internal/logger"
+	"harukizmoe/pimoe/internal/session"
+	pgstore "harukizmoe/pimoe/internal/storage/postgres"
 )
 
 const (
 	defaultServerAddr               = ":8080"
 	defaultServerProviderConfigPath = "configs/providers.yaml"
 	defaultServerSessionRoot        = ".moe/sessions"
+	defaultServerSessionStore       = "file"
+	serverSessionStoreFile          = "file"
+	serverSessionStorePostgres      = "postgres"
 	serverLogPath                   = ".moe/logs/agent.log"
 )
 
@@ -26,6 +35,8 @@ type serverOptions struct {
 	configPath   string
 	sessionRoot  string
 	providerName string
+	sessionStore string
+	postgresDSN  string
 }
 
 func main() {
@@ -43,8 +54,18 @@ func main() {
 			log.Printf("close logger: %v", err)
 		}
 	}()
+	sessionStore, closeSessionStore, err := openServerSessionStore(ctx, opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := closeSessionStore(); err != nil {
+			log.Printf("close session store: %v", err)
+		}
+	}()
 	sessionService, err := appservice.NewSessionService(appservice.SessionConfig{
 		SessionRoot:        opts.sessionRoot,
+		Store:              sessionStore,
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		Logger:             appLogger,
@@ -60,9 +81,10 @@ func main() {
 
 func parseServerOptions(args []string) (serverOptions, error) {
 	opts := serverOptions{
-		addr:        defaultServerAddr,
-		configPath:  defaultServerProviderConfigPath,
-		sessionRoot: defaultServerSessionRoot,
+		addr:         defaultServerAddr,
+		configPath:   defaultServerProviderConfigPath,
+		sessionRoot:  defaultServerSessionRoot,
+		sessionStore: defaultServerSessionStore,
 	}
 	flags := flag.NewFlagSet("pimoe-server", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -70,10 +92,55 @@ func parseServerOptions(args []string) (serverOptions, error) {
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.sessionRoot, "session-root", opts.sessionRoot, "managed session root")
 	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
+	flags.StringVar(&opts.sessionStore, "session-store", opts.sessionStore, "session metadata store: file or postgres")
+	flags.StringVar(&opts.postgresDSN, "postgres-dsn", "", "PostgreSQL DSN for --session-store postgres")
 	if err := flags.Parse(args); err != nil {
 		return serverOptions{}, fmt.Errorf("parse flags: %w", err)
 	}
+	if err := validateServerOptions(&opts); err != nil {
+		return serverOptions{}, err
+	}
 	return opts, nil
+}
+
+func validateServerOptions(opts *serverOptions) error {
+	opts.sessionStore = strings.ToLower(strings.TrimSpace(opts.sessionStore))
+	if opts.sessionStore == "" {
+		opts.sessionStore = defaultServerSessionStore
+	}
+	switch opts.sessionStore {
+	case serverSessionStoreFile:
+		return nil
+	case serverSessionStorePostgres:
+		if strings.TrimSpace(opts.postgresDSN) == "" {
+			return fmt.Errorf("--postgres-dsn is required when --session-store=postgres")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown session store %q; want file or postgres", opts.sessionStore)
+	}
+}
+
+func openServerSessionStore(ctx context.Context, opts serverOptions) (session.SessionStore, func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if opts.sessionStore == serverSessionStoreFile {
+		return nil, func() error { return nil }, nil
+	}
+
+	db, err := gorm.Open(postgres.Open(opts.postgresDSN), &gorm.Config{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres session store: %w", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres session store sql db: %w", err)
+	}
+	return pgstore.NewSessionStore(db, opts.sessionRoot), sqlDB.Close, nil
 }
 
 func runServer(ctx context.Context, server *http.Server) error {

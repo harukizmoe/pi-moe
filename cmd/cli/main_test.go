@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -76,6 +77,9 @@ func TestParseCLIOptionsDefaults(t *testing.T) {
 	if got.includeTrace {
 		t.Fatal("includeTrace = true, want false")
 	}
+	if gotSessionStore := cliOptionString(t, got, "sessionStore"); gotSessionStore != "file" {
+		t.Fatalf("sessionStore = %q, want file", gotSessionStore)
+	}
 	if strings.Join(got.promptArgs, " ") != "use calculator" {
 		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
 	}
@@ -103,6 +107,50 @@ func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
 	}
 	if strings.Join(got.promptArgs, " ") != "use calculator" {
 		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsPostgresSessionStore(t *testing.T) {
+	got, err := parseCLIOptions([]string{
+		"--session-store", "postgres",
+		"--postgres-dsn", "postgres://pimoe:test@localhost:5432/pimoe?sslmode=disable",
+		"use", "calculator",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if gotSessionStore := cliOptionString(t, got, "sessionStore"); gotSessionStore != "postgres" {
+		t.Fatalf("sessionStore = %q, want postgres", gotSessionStore)
+	}
+	if gotDSN := cliOptionString(t, got, "postgresDSN"); gotDSN != "postgres://pimoe:test@localhost:5432/pimoe?sslmode=disable" {
+		t.Fatalf("postgresDSN = %q, want flag value", gotDSN)
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsValidatesSessionStore(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "unknown store", args: []string{"--session-store", "sqlite", "prompt"}, wantErr: "sqlite"},
+		{name: "postgres requires dsn", args: []string{"--session-store", "postgres", "prompt"}, wantErr: "--postgres-dsn"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseCLIOptions(tt.args)
+			if err == nil {
+				t.Fatalf("parseCLIOptions(%#v) error = nil, want validation error", tt.args)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseCLIOptions(%#v) error = %q, want containing %q", tt.args, err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -883,6 +931,69 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	}
 }
 
+func TestCLIManagedSessionPathsUseInjectedSessionStore(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	store := newSpySessionStore(t.TempDir())
+	listed := store.seed("listed session", session.SessionConfig{ProviderName: "fake-local"})
+
+	var output bytes.Buffer
+	if err := runListSessionsWithStore(ctx, &output, store); err != nil {
+		t.Fatalf("runListSessionsWithStore() error = %v", err)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls = %d, want 1", store.listCalls)
+	}
+	if !strings.Contains(output.String(), listed.ID+"  ") {
+		t.Fatalf("runListSessionsWithStore() output = %q, want listed id %q", output.String(), listed.ID)
+	}
+
+	newOpts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithStore(ctx, newOpts, logger.NewNoop(), store, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithStore() create error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	if store.createCalls != 1 {
+		t.Fatalf("Create calls = %d, want 1", store.createCalls)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() touch error = %v", err)
+	}
+	if store.touchCalls != 1 {
+		t.Fatalf("Touch calls = %d, want 1", store.touchCalls)
+	}
+
+	resumeOpts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", maxSteps: 2, sessionPrompt: "override prompt", resumeSessionID: managed.ID, promptArgs: []string{"resume"}}
+	resumedRunner, resumed, err := newCLISessionWithStore(ctx, resumeOpts, logger.NewNoop(), store, "resume")
+	if err != nil {
+		t.Fatalf("newCLISessionWithStore() resume error = %v", err)
+	}
+	if resumedRunner == nil || resumed == nil || resumed.ID != managed.ID {
+		t.Fatalf("resumed runner/managed = %#v/%#v, want id %q", resumedRunner, resumed, managed.ID)
+	}
+	if store.resolveCalls == 0 {
+		t.Fatal("Resolve calls = 0, want resume path to resolve through injected store")
+	}
+	if err := touchManagedSession(ctx, resumed); err != nil {
+		t.Fatalf("touchManagedSession() update config error = %v", err)
+	}
+	if store.updateConfigCalls != 1 {
+		t.Fatalf("UpdateConfig calls = %d, want 1", store.updateConfigCalls)
+	}
+	if store.updatedConfig.MaxSteps != 2 || store.updatedConfig.SessionPrompt != "override prompt" || store.updatedConfig.ProviderName != "fake-local" {
+		t.Fatalf("updated config = %#v, want explicit resume overrides", store.updatedConfig)
+	}
+}
+
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)
@@ -1077,6 +1188,83 @@ func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 		t.Fatalf("formatRunOutput(trace error) exposed nil result placeholder: %q", got)
 	}
 }
+
+type spySessionStore struct {
+	root              string
+	nextID            int
+	metas             map[string]session.SessionMeta
+	createCalls       int
+	resolveCalls      int
+	listCalls         int
+	touchCalls        int
+	updateConfigCalls int
+	updatedConfig     session.SessionConfig
+}
+
+func newSpySessionStore(root string) *spySessionStore {
+	return &spySessionStore{root: root, metas: make(map[string]session.SessionMeta)}
+}
+
+func (s *spySessionStore) seed(title string, cfg session.SessionConfig) session.SessionMeta {
+	s.nextID++
+	id := fmt.Sprintf("spy-session-%d", s.nextID)
+	meta := session.SessionMeta{
+		ID:        id,
+		OwnerID:   session.LocalActor().UserID,
+		Path:      filepath.Join(s.root, id+".jsonl"),
+		Title:     title,
+		CreatedAt: time.Date(2026, 7, 10, 12, 0, s.nextID, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 10, 12, 0, s.nextID, 0, time.UTC),
+		Config:    cfg,
+	}
+	s.metas[id] = meta
+	return meta
+}
+
+func (s *spySessionStore) Create(ctx context.Context, actor session.Actor, title string, cfg session.SessionConfig) (session.SessionMeta, error) {
+	s.createCalls++
+	return s.seed(title, cfg), nil
+}
+
+func (s *spySessionStore) Resolve(ctx context.Context, actor session.Actor, id string) (session.SessionMeta, error) {
+	s.resolveCalls++
+	meta, ok := s.metas[id]
+	if !ok {
+		return session.SessionMeta{}, session.NewNotFoundError(id)
+	}
+	return meta, nil
+}
+
+func (s *spySessionStore) List(ctx context.Context, actor session.Actor) ([]session.SessionMeta, error) {
+	s.listCalls++
+	metas := make([]session.SessionMeta, 0, len(s.metas))
+	for _, meta := range s.metas {
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
+func (s *spySessionStore) UpdateConfig(ctx context.Context, actor session.Actor, id string, cfg session.SessionConfig) error {
+	s.updateConfigCalls++
+	meta, ok := s.metas[id]
+	if !ok {
+		return session.NewNotFoundError(id)
+	}
+	meta.Config = cfg
+	s.metas[id] = meta
+	s.updatedConfig = cfg
+	return nil
+}
+
+func (s *spySessionStore) Touch(ctx context.Context, actor session.Actor, id string) error {
+	s.touchCalls++
+	if _, ok := s.metas[id]; !ok {
+		return session.NewNotFoundError(id)
+	}
+	return nil
+}
+
+var _ session.SessionStore = (*spySessionStore)(nil)
 
 func eventStream(events ...session.Event) <-chan session.Event {
 	stream := make(chan session.Event, len(events))
