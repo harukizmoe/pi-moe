@@ -88,8 +88,8 @@ type cliOptions struct {
 	providerName string
 	// maxSteps 限制本次或 managed session 恢复后的 tool-calling 轮数；小于 1 表示使用默认/已存储值。
 	maxSteps int
-	// systemPrompt 是本次或 managed session 恢复后的系统级指令；不会写入 transcript。
-	systemPrompt string
+	// sessionPrompt 是本次或 managed session 恢复后的会话级指令；不会写入 transcript。
+	sessionPrompt string
 	// sessionPath 非空时启用 JSONL 会话恢复，空值保持一次性内存会话。
 	sessionPath string
 	// newSession 表示创建 manager-managed session 并用本轮 prompt 作为标题来源。
@@ -113,7 +113,7 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
 	flags.IntVar(&opts.maxSteps, "max-steps", 0, "maximum tool-calling rounds for this run/session")
-	flags.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt for this run/session")
+	flags.StringVar(&opts.sessionPrompt, "session-prompt", "", "session prompt for this run/session")
 	flags.StringVar(&opts.sessionPath, "session", "", "session JSONL path")
 	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
 	flags.BoolVar(&opts.interactive, "interactive", false, "read prompts line by line until quit or EOF")
@@ -148,19 +148,19 @@ func validateCLIOptions(opts cliOptions) error {
 		return fmt.Errorf("--max-steps must not be negative")
 	}
 	if opts.listSessions {
-		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume || opts.maxSteps > 0 || strings.TrimSpace(opts.systemPrompt) != "" {
-			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, --resume, --max-steps, or --system-prompt")
+		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume || opts.maxSteps > 0 || strings.TrimSpace(opts.sessionPrompt) != "" {
+			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, --resume, --max-steps, or --session-prompt")
 		}
 	}
 	return nil
 }
 
 type cliManagedSession struct {
-	manager              *session.Manager
-	ID                   string
-	providerOverride     string
-	maxStepsOverride     int
-	systemPromptOverride string
+	manager               *session.Manager
+	ID                    string
+	providerOverride      string
+	maxStepsOverride      int
+	sessionPromptOverride string
 }
 
 // newCLISession 根据 session 选项创建内存、显式 JSONL 或 manager-managed Session。
@@ -173,7 +173,8 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 	cfg := session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
-		SessionPrompt:      strings.TrimSpace(opts.systemPrompt),
+		BaseSystemPrompt:   "",
+		SessionPrompt:      strings.TrimSpace(opts.sessionPrompt),
 		Logger:             appLogger,
 		MaxSteps:           opts.maxSteps,
 	}
@@ -199,7 +200,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, systemPromptOverride: opts.systemPrompt}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
 	}
 
 	if strings.TrimSpace(opts.resumeSessionID) != "" {
@@ -220,8 +221,8 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		} else {
 			cfg.MaxSteps = meta.Config.MaxSteps
 		}
-		if systemPrompt := strings.TrimSpace(opts.systemPrompt); systemPrompt != "" {
-			cfg.SessionPrompt = systemPrompt
+		if sessionPrompt := strings.TrimSpace(opts.sessionPrompt); sessionPrompt != "" {
+			cfg.SessionPrompt = sessionPrompt
 		} else {
 			cfg.SessionPrompt = meta.Config.SessionPrompt
 		}
@@ -229,7 +230,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, systemPromptOverride: opts.systemPrompt}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
 	}
 
 	runner, err := session.New(ctx, cfg)
@@ -238,7 +239,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 func newCLIManagedSessionConfig(opts cliOptions) (session.SessionConfig, error) {
 	providerName := strings.TrimSpace(opts.providerName)
-	cfg := session.SessionConfig{SessionPrompt: strings.TrimSpace(opts.systemPrompt), MaxSteps: opts.maxSteps}
+	cfg := session.SessionConfig{SessionPrompt: strings.TrimSpace(opts.sessionPrompt), MaxSteps: opts.maxSteps}
 	if providerName != "" {
 		cfg.ProviderName = providerName
 		return cfg, nil
@@ -271,8 +272,8 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 		return nil
 	}
 	providerOverride := strings.TrimSpace(managed.providerOverride)
-	systemPromptOverride := strings.TrimSpace(managed.systemPromptOverride)
-	if providerOverride != "" || managed.maxStepsOverride > 0 || systemPromptOverride != "" {
+	sessionPromptOverride := strings.TrimSpace(managed.sessionPromptOverride)
+	if providerOverride != "" || managed.maxStepsOverride > 0 || sessionPromptOverride != "" {
 		meta, err := managed.manager.Resolve(ctx, managed.ID)
 		if err != nil {
 			return err
@@ -284,8 +285,8 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 		if managed.maxStepsOverride > 0 {
 			cfg.MaxSteps = managed.maxStepsOverride
 		}
-		if systemPromptOverride != "" {
-			cfg.SessionPrompt = systemPromptOverride
+		if sessionPromptOverride != "" {
+			cfg.SessionPrompt = sessionPromptOverride
 		}
 		return managed.manager.UpdateConfig(ctx, managed.ID, cfg)
 	}

@@ -182,6 +182,7 @@ func TestParseCLIOptionsRejectsConflictingSessionLifecycleFlags(t *testing.T) {
 		{name: "list and session", args: []string{"--list-sessions", "--session", "manual.jsonl"}},
 		{name: "list and new", args: []string{"--list-sessions", "--new-session"}},
 		{name: "list and resume", args: []string{"--list-sessions", "--resume", "abc"}},
+		{name: "list and session prompt", args: []string{"--list-sessions", "--session-prompt", "x"}},
 	}
 
 	for _, tt := range tests {
@@ -547,7 +548,7 @@ func TestResumeCLISessionReportsMissingStoredProviderWithOverrideGuidance(t *tes
 func TestParseCLIOptionsAcceptsManagedPreferenceFlags(t *testing.T) {
 	got, err := parseCLIOptions([]string{
 		"--max-steps", "2",
-		"--system-prompt", "answer like a careful calculator",
+		"--session-prompt", "answer like a careful calculator",
 		"--new-session",
 		"compute (2 + 3) * 4",
 	})
@@ -558,8 +559,8 @@ func TestParseCLIOptionsAcceptsManagedPreferenceFlags(t *testing.T) {
 	if gotMaxSteps := cliOptionInt(t, got, "maxSteps"); gotMaxSteps != 2 {
 		t.Fatalf("maxSteps = %d, want 2", gotMaxSteps)
 	}
-	if gotSystemPrompt := cliOptionString(t, got, "systemPrompt"); gotSystemPrompt != "answer like a careful calculator" {
-		t.Fatalf("systemPrompt = %q, want stored flag value", gotSystemPrompt)
+	if gotSessionPrompt := cliOptionString(t, got, "sessionPrompt"); gotSessionPrompt != "answer like a careful calculator" {
+		t.Fatalf("sessionPrompt = %q, want stored flag value", gotSessionPrompt)
 	}
 }
 
@@ -577,7 +578,7 @@ func TestNewCLISessionPersistsManagedPreferenceFlags(t *testing.T) {
 		"--config", providerConfigPath,
 		"--provider", "fake-local",
 		"--max-steps", "2",
-		"--system-prompt", "answer with only the final result",
+		"--session-prompt", "answer with only the final result",
 		"--new-session",
 		"use calculator to compute 13 * 7",
 	})
@@ -695,7 +696,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 	opts, err := parseCLIOptions([]string{
 		"--config", providerConfigPath,
 		"--max-steps", "2",
-		"--system-prompt", "override prompt",
+		"--session-prompt", "override prompt",
 		"--resume", created.ID,
 		"compute (2 + 3) * 4",
 	})
