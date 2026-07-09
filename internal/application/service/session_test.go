@@ -68,6 +68,78 @@ func TestSessionServiceCreateListAndRunUsesSessionManager(t *testing.T) {
 	}
 }
 
+type recordingSessionStore struct {
+	created []session.SessionMeta
+	actor   session.Actor
+}
+
+func (s *recordingSessionStore) Create(ctx context.Context, actor session.Actor, title string, cfg session.SessionConfig) (session.SessionMeta, error) {
+	s.actor = session.NormalizeActor(actor)
+	meta := session.SessionMeta{ID: "injected-session", OwnerID: s.actor.UserID, Path: filepath.Join(os.TempDir(), "injected-session.jsonl"), Title: title, Config: cfg}
+	s.created = append(s.created, meta)
+	return meta, nil
+}
+
+func (s *recordingSessionStore) Resolve(ctx context.Context, actor session.Actor, id string) (session.SessionMeta, error) {
+	for _, meta := range s.created {
+		if meta.ID == id && meta.OwnerID == session.NormalizeActor(actor).UserID {
+			return meta, nil
+		}
+	}
+	return session.SessionMeta{}, fmt.Errorf("session %q not found", id)
+}
+
+func (s *recordingSessionStore) List(ctx context.Context, actor session.Actor) ([]session.SessionMeta, error) {
+	owner := session.NormalizeActor(actor).UserID
+	out := make([]session.SessionMeta, 0, len(s.created))
+	for _, meta := range s.created {
+		if meta.OwnerID == owner {
+			out = append(out, meta)
+		}
+	}
+	return out, nil
+}
+
+func (s *recordingSessionStore) UpdateConfig(ctx context.Context, actor session.Actor, id string, cfg session.SessionConfig) error {
+	return nil
+}
+
+func (s *recordingSessionStore) Touch(ctx context.Context, actor session.Actor, id string) error {
+	return nil
+}
+
+func TestSessionServiceUsesInjectedSessionStore(t *testing.T) {
+	ctx := context.Background()
+	store := &recordingSessionStore{}
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+		Store:              store,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	actor := session.Actor{UserID: "alice"}
+	created, err := svc.Create(ctx, actor, "alice prompt")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.OwnerID != "alice" {
+		t.Fatalf("Create() OwnerID = %q, want alice", created.OwnerID)
+	}
+	if store.actor.UserID != "alice" {
+		t.Fatalf("store actor = %q, want alice", store.actor.UserID)
+	}
+	listed, err := svc.List(ctx, actor)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("List() = %#v, want injected session", listed)
+	}
+}
+
 func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
 	ctx := context.Background()
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")

@@ -19,6 +19,8 @@ import (
 type SessionConfig struct {
 	// SessionRoot 是 session.Manager 保存 index 和 transcript 的根目录；为空时使用默认目录。
 	SessionRoot string
+	// Store 覆盖 session metadata store；为空时使用 SessionRoot 创建 file-backed store。
+	Store session.SessionStore
 	// ProviderConfigPath 指向 providers YAML 配置文件。
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
@@ -33,7 +35,7 @@ type SessionConfig struct {
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	manager    *session.Manager
+	store      session.SessionStore
 	config     session.Config
 	basePrompt string
 
@@ -188,8 +190,12 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 	if strings.TrimSpace(cfg.ProviderConfigPath) == "" {
 		return nil, fmt.Errorf("provider config path must not be empty")
 	}
+	store := cfg.Store
+	if store == nil {
+		store = session.NewManager(cfg.SessionRoot)
+	}
 	return &SessionService{
-		manager: session.NewManager(cfg.SessionRoot),
+		store: store,
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
@@ -366,9 +372,9 @@ func (s *SessionService) persistRunSuccess(ctx context.Context, actor session.Ac
 	if override {
 		cfg := meta.Config
 		cfg.ProviderName = providerName
-		return s.manager.UpdateConfig(ctx, actor, meta.ID, cfg)
+		return s.store.UpdateConfig(ctx, actor, meta.ID, cfg)
 	}
-	return s.manager.Touch(ctx, actor, meta.ID)
+	return s.store.Touch(ctx, actor, meta.ID)
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。
@@ -380,7 +386,7 @@ func (s *SessionService) Create(ctx context.Context, actor session.Actor, title 
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	return s.manager.Create(ctx, actor, title, cfg)
+	return s.store.Create(ctx, actor, title, cfg)
 }
 
 // List 返回可恢复 sessions。
@@ -388,7 +394,7 @@ func (s *SessionService) List(ctx context.Context, actor session.Actor) ([]Sessi
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
-	return s.manager.List(ctx, actor)
+	return s.store.List(ctx, actor)
 }
 
 // Get 返回 session metadata 和当前可恢复 transcript。
@@ -396,7 +402,7 @@ func (s *SessionService) Get(ctx context.Context, actor session.Actor, sessionID
 	if s == nil {
 		return SessionDetail{}, fmt.Errorf("session service is nil")
 	}
-	meta, err := s.manager.Resolve(ctx, actor, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return SessionDetail{}, err
 	}
@@ -419,7 +425,7 @@ func (s *SessionService) Run(ctx context.Context, actor session.Actor, sessionID
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, actor, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -428,7 +434,7 @@ func (s *SessionService) Run(ctx context.Context, actor session.Actor, sessionID
 		return RunResult{}, err
 	}
 	defer unlock()
-	meta, err = s.manager.Resolve(ctx, actor, meta.ID)
+	meta, err = s.store.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -458,7 +464,7 @@ func (s *SessionService) Stream(ctx context.Context, actor session.Actor, sessio
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, actor, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +477,7 @@ func (s *SessionService) Stream(ctx context.Context, actor session.Actor, sessio
 			unlock()
 		}
 	}()
-	meta, err = s.manager.Resolve(ctx, actor, meta.ID)
+	meta, err = s.store.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return nil, err
 	}
