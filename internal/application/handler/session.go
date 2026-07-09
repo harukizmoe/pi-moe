@@ -34,11 +34,11 @@ func NewSessionHandler(service SessionService) *SessionHandler {
 }
 
 type createSessionRequest struct {
-	Input        string `json:"input"`
-	Title        string `json:"title"`
-	ProviderName string `json:"provider_name"`
-	MaxSteps     int    `json:"max_steps"`
-	SystemPrompt string `json:"system_prompt"`
+	Input         string `json:"input"`
+	Title         string `json:"title"`
+	ProviderName  string `json:"provider_name"`
+	MaxSteps      int    `json:"max_steps"`
+	SessionPrompt string `json:"session_prompt"`
 }
 
 type sessionResponse struct {
@@ -77,9 +77,9 @@ type sessionToolCallResponse struct {
 }
 
 type sessionConfigResponse struct {
-	ProviderName    string `json:"provider_name,omitempty"`
-	MaxSteps        int    `json:"max_steps,omitempty"`
-	HasSystemPrompt bool   `json:"has_system_prompt,omitempty"`
+	ProviderName     string `json:"provider_name,omitempty"`
+	MaxSteps         int    `json:"max_steps,omitempty"`
+	HasSessionPrompt bool   `json:"has_session_prompt,omitempty"`
 }
 
 type runRequest struct {
@@ -120,7 +120,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 	if title == "" {
 		title = strings.TrimSpace(req.Input)
 	}
-	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SystemPrompt})
+	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SessionPrompt})
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
@@ -243,9 +243,9 @@ func newSessionDetailResponse(detail appservice.SessionDetail) sessionDetailResp
 
 func newSessionConfigResponse(cfg session.SessionConfig) sessionConfigResponse {
 	return sessionConfigResponse{
-		ProviderName:    cfg.ProviderName,
-		MaxSteps:        cfg.MaxSteps,
-		HasSystemPrompt: strings.TrimSpace(cfg.SessionPrompt) != "",
+		ProviderName:     cfg.ProviderName,
+		MaxSteps:         cfg.MaxSteps,
+		HasSessionPrompt: strings.TrimSpace(cfg.SessionPrompt) != "",
 	}
 }
 

@@ -18,9 +18,9 @@ import (
 )
 
 type sessionConfigResponse struct {
-	ProviderName    string `json:"provider_name"`
-	MaxSteps        int    `json:"max_steps"`
-	HasSystemPrompt bool   `json:"has_system_prompt"`
+	ProviderName     string `json:"provider_name"`
+	MaxSteps         int    `json:"max_steps"`
+	HasSessionPrompt bool   `json:"has_session_prompt"`
 }
 
 type sessionResponse struct {
@@ -159,8 +159,9 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	createdBody := created.Body.String()
 	assertBodyContains(t, createdBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyContains(t, createdBody, `"max_steps":4`)
-	assertBodyNotContains(t, createdBody, `"has_system_prompt"`)
+	assertBodyNotContains(t, createdBody, `"has_session_prompt"`)
 	assertBodyNotContains(t, createdBody, "private system prompt")
+	assertBodyNotContains(t, createdBody, `"session_prompt":`)
 	assertBodyNotContains(t, createdBody, `"system_prompt":`)
 	createdSession := decodeJSONString[sessionResponse](t, createdBody)
 	assertConfigSummary(t, createdSession.Config, "fake-local", 4, false)
@@ -170,6 +171,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	listedBody := listed.Body.String()
 	assertBodyContains(t, listedBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyNotContains(t, listedBody, "private system prompt")
+	assertBodyNotContains(t, listedBody, `"session_prompt":`)
 	assertBodyNotContains(t, listedBody, `"system_prompt":`)
 	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
 	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
@@ -182,12 +184,13 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	detailBody := detail.Body.String()
 	assertBodyContains(t, detailBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyNotContains(t, detailBody, "private system prompt")
+	assertBodyNotContains(t, detailBody, `"session_prompt":`)
 	assertBodyNotContains(t, detailBody, `"system_prompt":`)
 	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
 	assertConfigSummary(t, detailSession.Config, "fake-local", 4, false)
 }
 
-func TestRouterCreateAcceptsConfigOverridesWithoutExposingSystemPrompt(t *testing.T) {
+func TestRouterCreateAcceptsConfigOverridesWithoutExposingSessionPrompt(t *testing.T) {
 	configPath := writeRouterProvidersConfigContent(t, `llms:
   default_provider: fake-local
   providers:
@@ -205,41 +208,47 @@ func TestRouterCreateAcceptsConfigOverridesWithoutExposingSystemPrompt(t *testin
 	})
 
 	created := postJSON(t, handler, "/v1/sessions", map[string]any{
-		"input":         "hello",
-		"provider_name": "fake-alt",
-		"max_steps":     5,
-		"system_prompt": "private request system prompt",
+		"title":          "demo",
+		"provider_name":  "fake-local",
+		"session_prompt": "private session prompt",
+		"max_steps":      4,
 	})
 	assertStatus(t, created, http.StatusCreated)
 	createdBody := created.Body.String()
-	assertBodyContains(t, createdBody, `"provider_name":"fake-alt"`)
-	assertBodyContains(t, createdBody, `"max_steps":5`)
-	assertBodyContains(t, createdBody, `"has_system_prompt":true`)
-	assertBodyNotContains(t, createdBody, "private request system prompt")
+	assertBodyContains(t, createdBody, `"provider_name":"fake-local"`)
+	assertBodyContains(t, createdBody, `"max_steps":4`)
+	assertBodyContains(t, createdBody, `"has_session_prompt":true`)
+	assertBodyNotContains(t, createdBody, "private session prompt")
+	assertBodyNotContains(t, createdBody, `"session_prompt":`)
 	assertBodyNotContains(t, createdBody, `"system_prompt":`)
+	assertBodyNotContains(t, createdBody, `"has_system_prompt"`)
 	createdSession := decodeJSONString[sessionResponse](t, createdBody)
-	assertConfigSummary(t, createdSession.Config, "fake-alt", 5, true)
+	assertConfigSummary(t, createdSession.Config, "fake-local", 4, true)
 
 	listed := getJSON(t, handler, "/v1/sessions")
 	assertStatus(t, listed, http.StatusOK)
 	listedBody := listed.Body.String()
-	assertBodyContains(t, listedBody, `"provider_name":"fake-alt"`)
-	assertBodyNotContains(t, listedBody, "private request system prompt")
+	assertBodyContains(t, listedBody, `"provider_name":"fake-local"`)
+	assertBodyNotContains(t, listedBody, "private session prompt")
+	assertBodyNotContains(t, listedBody, `"session_prompt":`)
 	assertBodyNotContains(t, listedBody, `"system_prompt":`)
+	assertBodyNotContains(t, listedBody, `"has_system_prompt"`)
 	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
 	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
 		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
 	}
-	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-alt", 5, true)
+	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-local", 4, true)
 
 	detail := getJSON(t, handler, "/v1/sessions/"+createdSession.ID)
 	assertStatus(t, detail, http.StatusOK)
 	detailBody := detail.Body.String()
-	assertBodyContains(t, detailBody, `"provider_name":"fake-alt"`)
-	assertBodyNotContains(t, detailBody, "private request system prompt")
+	assertBodyContains(t, detailBody, `"provider_name":"fake-local"`)
+	assertBodyNotContains(t, detailBody, "private session prompt")
+	assertBodyNotContains(t, detailBody, `"session_prompt":`)
 	assertBodyNotContains(t, detailBody, `"system_prompt":`)
+	assertBodyNotContains(t, detailBody, `"has_system_prompt"`)
 	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
-	assertConfigSummary(t, detailSession.Config, "fake-alt", 5, true)
+	assertConfigSummary(t, detailSession.Config, "fake-local", 4, true)
 }
 
 func TestRouterRunAcceptsProviderNameOverride(t *testing.T) {
@@ -575,10 +584,10 @@ func assertSession(t *testing.T, got sessionResponse, wantTitle string) {
 	}
 }
 
-func assertConfigSummary(t *testing.T, got sessionConfigResponse, wantProvider string, wantMaxSteps int, wantHasSystemPrompt bool) {
+func assertConfigSummary(t *testing.T, got sessionConfigResponse, wantProvider string, wantMaxSteps int, wantHasSessionPrompt bool) {
 	t.Helper()
-	if got.ProviderName != wantProvider || got.MaxSteps != wantMaxSteps || got.HasSystemPrompt != wantHasSystemPrompt {
-		t.Fatalf("config = %#v, want provider %q max_steps %d has_system_prompt %t", got, wantProvider, wantMaxSteps, wantHasSystemPrompt)
+	if got.ProviderName != wantProvider || got.MaxSteps != wantMaxSteps || got.HasSessionPrompt != wantHasSessionPrompt {
+		t.Fatalf("config = %#v, want provider %q max_steps %d has_session_prompt %t", got, wantProvider, wantMaxSteps, wantHasSessionPrompt)
 	}
 }
 
