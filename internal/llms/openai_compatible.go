@@ -128,16 +128,16 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 		var toolCalls []openAIToolCall
 		for {
 			if err := ctx.Err(); err != nil {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream context: %w", err)}
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai-compatible stream context: %w", err)}
 				return
 			}
 
 			payload, err := readOpenAIStreamData(reader)
 			if err != nil {
 				if err == io.EOF {
-					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream ended without done")}
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai-compatible stream ended before completion")}
 				} else {
-					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("read openai chat stream: %w", err)}
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("read openai-compatible stream: %w", err)}
 				}
 				return
 			}
@@ -145,13 +145,17 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				continue
 			}
 			if payload == "[DONE]" {
+				if err := validateOpenAIStreamToolCalls(toolCalls); err != nil {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: err}
+					return
+				}
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
 				return
 			}
 
 			var decoded openAIChatStreamResponse
 			if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("unmarshal openai chat stream chunk: %w", err)}
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("parse openai-compatible stream chunk: %w", err)}
 				return
 			}
 			if decoded.Error != nil {
@@ -187,6 +191,10 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDelta, Delta: delta}
 			}
 			if choice.FinishReason != "" {
+				if err := validateOpenAIStreamToolCalls(toolCalls); err != nil {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: err}
+					return
+				}
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
 				return
 			}
@@ -218,7 +226,7 @@ func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req Ch
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("send openai chat request: %w", err)
+		return nil, fmt.Errorf("openai-compatible chat completions request: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		err := openAIStatusError(resp)
@@ -232,21 +240,21 @@ func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req Ch
 func openAIStatusError(resp *http.Response) error {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOpenAIErrorBodyBytes))
 	if readErr != nil {
-		return fmt.Errorf("openai chat returned status %d and failed to read error body: %w", resp.StatusCode, readErr)
+		return fmt.Errorf("openai-compatible chat completions failed: status %d: read error body: %w", resp.StatusCode, readErr)
 	}
 	bodyText := strings.TrimSpace(string(body))
 	if bodyText == "" {
-		return fmt.Errorf("openai chat returned status %d", resp.StatusCode)
+		bodyText = "<empty body>"
 	}
-	return fmt.Errorf("openai chat returned status %d: %s", resp.StatusCode, bodyText)
+	return fmt.Errorf("openai-compatible chat completions failed: status %d: %s", resp.StatusCode, bodyText)
 }
 
 func openAIStreamResponseError(streamErr *openAIStreamError) error {
 	message := strings.TrimSpace(streamErr.Message)
 	if message == "" {
-		return fmt.Errorf("openai chat stream returned error")
+		return fmt.Errorf("openai-compatible stream error")
 	}
-	return fmt.Errorf("openai chat stream returned error: %s", message)
+	return fmt.Errorf("openai-compatible stream error: %s", message)
 }
 
 func readOpenAIStreamData(reader *bufio.Reader) (string, error) {
@@ -323,6 +331,25 @@ func mergeOpenAIStreamToolCalls(toolCalls []openAIToolCall, deltas []openAIChatT
 	}
 
 	return toolCalls, nil
+}
+
+func validateOpenAIStreamToolCalls(toolCalls []openAIToolCall) error {
+	for i, toolCall := range toolCalls {
+		if strings.TrimSpace(toolCall.ID) == "" {
+			return fmt.Errorf("openai-compatible tool call missing id at index %d", i)
+		}
+		if strings.TrimSpace(toolCall.Function.Name) == "" {
+			return fmt.Errorf("openai-compatible tool call missing function name at index %d", i)
+		}
+		arguments := strings.TrimSpace(toolCall.Function.Arguments)
+		if arguments == "" {
+			return fmt.Errorf("openai-compatible tool call arguments are not valid JSON at index %d", i)
+		}
+		if !json.Valid([]byte(arguments)) {
+			return fmt.Errorf("openai-compatible tool call arguments are not valid JSON at index %d", i)
+		}
+	}
+	return nil
 }
 
 func openAIStreamMessage(role Role, content string, toolCalls []openAIToolCall) Message {

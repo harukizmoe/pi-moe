@@ -3,6 +3,7 @@ package llms
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,6 +221,129 @@ func TestOpenAICompatibleProviderStatusErrorIncludesBodyExcerpt(t *testing.T) {
 	if !strings.Contains(err.Error(), "upstream exploded") {
 		t.Fatalf("error missing body excerpt: %v", err)
 	}
+}
+
+func TestOpenAICompatibleProviderStatusErrorsAreStableAndRedacted(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			name:       "json_body",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":{"message":"bad key"}}`,
+			want:       []string{"openai-compatible chat completions failed", "status 401", "bad key"},
+			wantAbsent: []string{"secret-token", "Authorization"},
+		},
+		{
+			name:       "plain_text_body",
+			statusCode: http.StatusTooManyRequests,
+			body:       "rate limited",
+			want:       []string{"openai-compatible chat completions failed", "status 429", "rate limited"},
+		},
+		{
+			name:       "empty_body",
+			statusCode: http.StatusInternalServerError,
+			body:       "",
+			want:       []string{"openai-compatible chat completions failed", "status 500", "<empty body>"},
+		},
+		{
+			name:       "long_body_is_truncated",
+			statusCode: http.StatusBadGateway,
+			body:       strings.Repeat("x", maxOpenAIErrorBodyBytes+50),
+			want:       []string{"openai-compatible chat completions failed", "status 502", strings.Repeat("x", maxOpenAIErrorBodyBytes)},
+			wantAbsent: []string{strings.Repeat("x", maxOpenAIErrorBodyBytes+1)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+					t.Fatalf("authorization = %q", got)
+				}
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, APIKey: "secret-token", TimeoutSeconds: 3})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+			}
+
+			_, err = CollectChat(context.Background(), provider, ChatRequest{})
+			if err == nil {
+				t.Fatal("CollectChat() error = nil")
+			}
+			errorText := err.Error()
+			for _, want := range tt.want {
+				if !strings.Contains(errorText, want) {
+					t.Fatalf("error %q missing %q", errorText, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(errorText, absent) {
+					t.Fatalf("error %q leaked %q", errorText, absent)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleProviderRequestErrorsKeepContextSemantics(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(50 * time.Millisecond)
+		}))
+		defer server.Close()
+
+		provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 1})
+		if err != nil {
+			t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		defer cancel()
+		_, err = CollectChat(ctx, provider, ChatRequest{})
+		if err == nil {
+			t.Fatal("CollectChat() error = nil")
+		}
+		if !strings.Contains(err.Error(), "openai-compatible chat completions request") {
+			t.Fatalf("error missing request stage: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want context deadline semantics", err)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("server should not receive canceled request")
+		}))
+		defer server.Close()
+
+		provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+		if err != nil {
+			t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = CollectChat(ctx, provider, ChatRequest{})
+		if err == nil {
+			t.Fatal("CollectChat() error = nil")
+		}
+		if !strings.Contains(err.Error(), "openai-compatible chat completions request") {
+			t.Fatalf("error missing request stage: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled semantics", err)
+		}
+	})
 }
 
 func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *testing.T) {
@@ -542,6 +666,103 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 	}
 }
 
+func TestOpenAICompatibleProviderChatStreamRejectsInvalidFinalToolCalls(t *testing.T) {
+	tests := []struct {
+		name        string
+		payloads    []string
+		wantMessage string
+	}{
+		{
+			name: "invalid_arguments_json",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","function":{"name":"calculator","arguments":"{bad json"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "empty_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_empty","function":{"name":"calculator","arguments":""}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "whitespace_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_blank","function":{"name":"calculator","arguments":"   "}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "omitted_arguments",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_omitted","function":{"name":"calculator"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "missing_id",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"calculator","arguments":"{\"a\":13}"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call missing id",
+		},
+		{
+			name: "missing_name",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_missing_name","function":{"arguments":"{\"a\":13}"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call missing function name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(t, w, tt.payloads...)
+			}))
+			defer server.Close()
+
+			provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+			}
+
+			stream, err := provider.ChatStream(context.Background(), ChatRequest{})
+			if err != nil {
+				t.Fatalf("ChatStream() error = %v", err)
+			}
+			events := collectChatStreamEvents(t, stream)
+
+			var errorText string
+			var sawDone bool
+			for _, event := range events {
+				switch event.Type {
+				case ChatStreamEventTypeError:
+					if event.Err == nil {
+						t.Fatal("error event err = nil")
+					}
+					errorText = event.Err.Error()
+				case ChatStreamEventTypeDone:
+					sawDone = true
+				}
+			}
+			if sawDone {
+				t.Fatalf("unexpected done event: %#v", events)
+			}
+			if !strings.Contains(errorText, tt.wantMessage) {
+				t.Fatalf("error = %q, want %q; events = %#v", errorText, tt.wantMessage, events)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamErrors(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -598,8 +819,8 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				if errorText == "" {
 					t.Fatalf("events missing error event: %#v", events)
 				}
-				if !strings.Contains(errorText, "decode") && !strings.Contains(errorText, "unmarshal") {
-					t.Fatalf("error missing decode context: %q", errorText)
+				if !strings.Contains(errorText, "parse openai-compatible stream chunk") {
+					t.Fatalf("error missing parse context: %q", errorText)
 				}
 				if sawDone {
 					t.Fatalf("unexpected done event: %#v", events)
@@ -634,8 +855,8 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				if errorText == "" {
 					t.Fatalf("events missing error event: %#v", events)
 				}
-				if !strings.Contains(errorText, "openai chat stream") {
-					t.Fatalf("error missing openai chat stream context: %q", errorText)
+				if !strings.Contains(errorText, "openai-compatible stream error") {
+					t.Fatalf("error missing stream error context: %q", errorText)
 				}
 				if !strings.Contains(errorText, "quota exhausted") {
 					t.Fatalf("error missing quota message: %q", errorText)
@@ -717,8 +938,8 @@ func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone
 			if sawDone {
 				t.Fatalf("unexpected done event: %#v", events)
 			}
-			if !strings.Contains(errorText, "ended without done") {
-				t.Fatalf("error missing ended without done: %#v", events)
+			if !strings.Contains(errorText, "openai-compatible stream ended before completion") {
+				t.Fatalf("error missing ended before completion: %#v", events)
 			}
 		})
 	}
