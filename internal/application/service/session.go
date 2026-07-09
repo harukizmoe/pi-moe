@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -22,14 +23,19 @@ type SessionConfig struct {
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
 	ProviderName string
+	// BaseSystemPrompt 保存项目级基础系统指令；不会持久化到 session metadata。
+	BaseSystemPrompt string
+	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
+	MaxSteps int
 	// Logger 接收 Agent 运行日志；为空时使用 no-op logger。
 	Logger logger.Logger
 }
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	store  data.SessionStore
-	config session.Config
+	store      data.SessionStore
+	config     session.Config
+	basePrompt string
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
@@ -72,6 +78,44 @@ type RunResult struct {
 	Answer string
 	// ToolSteps 保存本轮运行发生的工具调用及其结果。
 	ToolSteps []ToolStep
+}
+
+// RunOptions 保存单次运行可覆盖的偏好。
+type RunOptions struct {
+	// ProviderName 覆盖本次运行使用的 Provider；成功后写回 session 偏好。
+	ProviderName string
+}
+
+// CreateOptions 保存创建 session 时可持久化的运行偏好覆盖。
+type CreateOptions struct {
+	// ProviderName 覆盖新 session 使用的 Provider；为空时使用服务配置或 llms.default_provider。
+	ProviderName string
+	// SessionPrompt 覆盖新 session 的行为设定；为空时不持久化 session prompt。
+	SessionPrompt string
+	// MaxSteps 覆盖新 session 的 tool-calling 最大轮数；小于 1 时使用服务配置。
+	MaxSteps int
+}
+
+type providerSelectionError struct {
+	err error
+}
+
+func (e providerSelectionError) Error() string {
+	return e.err.Error()
+}
+
+func (e providerSelectionError) Unwrap() error {
+	return e.err
+}
+
+// IsProviderSelectionError reports whether err was caused by choosing an unavailable provider.
+func IsProviderSelectionError(err error) bool {
+	var providerErr providerSelectionError
+	return errors.As(err, &providerErr)
+}
+
+func newProviderSelectionError(format string, args ...any) error {
+	return providerSelectionError{err: fmt.Errorf(format, args...)}
 }
 
 // ToolStep 描述一次工具调用的输入和结果。
@@ -148,8 +192,11 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
+			BaseSystemPrompt:   strings.TrimSpace(cfg.BaseSystemPrompt),
 			Logger:             cfg.Logger,
+			MaxSteps:           cfg.MaxSteps,
 		},
+		basePrompt: strings.TrimSpace(cfg.BaseSystemPrompt),
 	}, nil
 }
 
@@ -206,12 +253,114 @@ func (s *SessionService) CurrentProviderDiagnostics(ctx context.Context) (Provid
 	return diagnostics, nil
 }
 
+func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOptions) (session.SessionConfig, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return session.SessionConfig{}, err
+		}
+	}
+	cfg := session.SessionConfig{
+		ProviderName: strings.TrimSpace(s.config.ProviderName),
+		MaxSteps:     s.config.MaxSteps,
+	}
+	if providerName := strings.TrimSpace(opts.ProviderName); providerName != "" {
+		cfg.ProviderName = providerName
+	} else if cfg.ProviderName == "" {
+		loaded, err := appconfig.Load(s.config.ProviderConfigPath)
+		if err != nil {
+			return session.SessionConfig{}, err
+		}
+		cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
+	}
+	if sessionPrompt := strings.TrimSpace(opts.SessionPrompt); sessionPrompt != "" {
+		cfg.SessionPrompt = sessionPrompt
+	}
+	if opts.MaxSteps > 0 {
+		cfg.MaxSteps = opts.MaxSteps
+	}
+	return cfg, nil
+}
+
+func firstRunOptions(opts []RunOptions) RunOptions {
+	if len(opts) == 0 {
+		return RunOptions{}
+	}
+	return opts[0]
+}
+
+func firstCreateOptions(opts []CreateOptions) CreateOptions {
+	if len(opts) == 0 {
+		return CreateOptions{}
+	}
+	return opts[0]
+}
+
+func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return session.Config{}, "", false, err
+		}
+	}
+	providerName := strings.TrimSpace(opts.ProviderName)
+	override := providerName != ""
+	if providerName == "" {
+		providerName = strings.TrimSpace(meta.Config.ProviderName)
+	}
+	if providerName == "" {
+		providerName = strings.TrimSpace(s.config.ProviderName)
+	}
+
+	runCfg := s.config
+	runCfg.ProviderName = providerName
+	runCfg.BaseSystemPrompt = strings.TrimSpace(s.basePrompt)
+	if meta.Config.MaxSteps > 0 {
+		runCfg.MaxSteps = meta.Config.MaxSteps
+	}
+	if sessionPrompt := strings.TrimSpace(meta.Config.SessionPrompt); sessionPrompt != "" {
+		runCfg.SessionPrompt = sessionPrompt
+	}
+	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {
+		if meta.Config.ProviderName != "" && !override {
+			return session.Config{}, "", false, newProviderSelectionError("session %q provider %q is not configured; specify provider_name to choose another provider", meta.ID, providerName)
+		}
+		return session.Config{}, "", false, err
+	}
+	return runCfg, providerName, override, nil
+}
+
+func ensureProviderConfigured(path string, providerName string) error {
+	if strings.TrimSpace(providerName) == "" {
+		return nil
+	}
+	loaded, err := appconfig.Load(path)
+	if err != nil {
+		return err
+	}
+	if _, ok := loaded.LLMs.Providers[providerName]; !ok {
+		return newProviderSelectionError("unknown provider %q", providerName)
+	}
+	return nil
+}
+
+func (s *SessionService) persistRunSuccess(ctx context.Context, meta SessionMeta, providerName string, override bool) error {
+	if override {
+		cfg := meta.Config
+		cfg.ProviderName = providerName
+		return s.store.UpdateConfig(ctx, meta.ID, cfg)
+	}
+	return s.store.Touch(ctx, meta.ID)
+}
+
 // Create 创建一个 managed session，并用 title 生成可读标题。
-func (s *SessionService) Create(ctx context.Context, title string) (SessionMeta, error) {
+func (s *SessionService) Create(ctx context.Context, title string, opts ...CreateOptions) (SessionMeta, error) {
 	if s == nil {
 		return SessionMeta{}, fmt.Errorf("session service is nil")
 	}
-	return s.store.Create(ctx, title)
+	cfg, err := s.defaultSessionConfig(ctx, firstCreateOptions(opts))
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	return s.store.Create(ctx, title, cfg)
 }
 
 // List 返回可恢复 sessions。
@@ -243,7 +392,7 @@ func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDeta
 }
 
 // Run 在指定 session 上执行一轮 prompt，并返回最终答案和工具步骤。
-func (s *SessionService) Run(ctx context.Context, sessionID string, input string) (RunResult, error) {
+func (s *SessionService) Run(ctx context.Context, sessionID string, input string, opts ...RunOptions) (RunResult, error) {
 	if s == nil {
 		return RunResult{}, fmt.Errorf("session service is nil")
 	}
@@ -254,7 +403,11 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return RunResult{}, err
 	}
-	runner, err := session.Open(ctx, s.config, meta.Path)
+	runCfg, providerName, override, err := s.resolveRunConfig(ctx, meta, firstRunOptions(opts))
+	if err != nil {
+		return RunResult{}, err
+	}
+	runner, err := session.Open(ctx, runCfg, meta.Path)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -262,14 +415,14 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return result, err
 	}
-	if err := s.store.Touch(ctx, sessionID); err != nil {
+	if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 // Stream 在指定 session 上执行一轮 prompt，并返回稳定的应用层流式事件。
-func (s *SessionService) Stream(ctx context.Context, sessionID string, input string) (<-chan StreamEvent, error) {
+func (s *SessionService) Stream(ctx context.Context, sessionID string, input string, opts ...RunOptions) (<-chan StreamEvent, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
@@ -280,13 +433,17 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	if err != nil {
 		return nil, err
 	}
-	runner, err := session.Open(ctx, s.config, meta.Path)
+	runCfg, providerName, override, err := s.resolveRunConfig(ctx, meta, firstRunOptions(opts))
+	if err != nil {
+		return nil, err
+	}
+	runner, err := session.Open(ctx, runCfg, meta.Path)
 	if err != nil {
 		return nil, err
 	}
 
 	out := make(chan StreamEvent)
-	go s.forwardStreamEvents(ctx, sessionID, runner.Prompt(ctx, input), out)
+	go s.forwardStreamEvents(ctx, meta, providerName, override, runner.Prompt(ctx, input), out)
 	return out, nil
 }
 
@@ -334,7 +491,7 @@ func stableRawJSON(value string) json.RawMessage {
 	return encoded
 }
 
-func (s *SessionService) forwardStreamEvents(ctx context.Context, sessionID string, events <-chan session.Event, out chan<- StreamEvent) {
+func (s *SessionService) forwardStreamEvents(ctx context.Context, meta SessionMeta, providerName string, override bool, events <-chan session.Event, out chan<- StreamEvent) {
 	defer close(out)
 	var answer string
 	for event := range events {
@@ -367,7 +524,7 @@ func (s *SessionService) forwardStreamEvents(ctx context.Context, sessionID stri
 				answer = event.Message.Content
 			}
 		case session.RunEndEvent:
-			if err := s.store.Touch(ctx, sessionID); err != nil {
+			if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
 				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: err.Error()}})
 				return
 			}

@@ -15,11 +15,11 @@ import (
 
 // SessionService 描述 SessionHandler 需要的业务能力。
 type SessionService interface {
-	Create(ctx context.Context, title string) (appservice.SessionMeta, error)
+	Create(ctx context.Context, title string, opts ...appservice.CreateOptions) (appservice.SessionMeta, error)
 	List(ctx context.Context) ([]appservice.SessionMeta, error)
 	Get(ctx context.Context, sessionID string) (appservice.SessionDetail, error)
-	Run(ctx context.Context, sessionID string, input string) (appservice.RunResult, error)
-	Stream(ctx context.Context, sessionID string, input string) (<-chan appservice.StreamEvent, error)
+	Run(ctx context.Context, sessionID string, input string, opts ...appservice.RunOptions) (appservice.RunResult, error)
+	Stream(ctx context.Context, sessionID string, input string, opts ...appservice.RunOptions) (<-chan appservice.StreamEvent, error)
 	CurrentProviderDiagnostics(ctx context.Context) (appservice.ProviderDiagnostics, error)
 }
 
@@ -34,15 +34,19 @@ func NewSessionHandler(service SessionService) *SessionHandler {
 }
 
 type createSessionRequest struct {
-	Input string `json:"input"`
-	Title string `json:"title"`
+	Input         string `json:"input"`
+	Title         string `json:"title"`
+	ProviderName  string `json:"provider_name"`
+	MaxSteps      int    `json:"max_steps"`
+	SessionPrompt string `json:"session_prompt"`
 }
 
 type sessionResponse struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ID        string                `json:"id"`
+	Title     string                `json:"title"`
+	CreatedAt string                `json:"created_at"`
+	UpdatedAt string                `json:"updated_at"`
+	Config    sessionConfigResponse `json:"config"`
 }
 
 type sessionsResponse struct {
@@ -54,6 +58,7 @@ type sessionDetailResponse struct {
 	Title     string                   `json:"title"`
 	CreatedAt string                   `json:"created_at"`
 	UpdatedAt string                   `json:"updated_at"`
+	Config    sessionConfigResponse    `json:"config"`
 	Messages  []sessionMessageResponse `json:"messages"`
 }
 
@@ -71,8 +76,15 @@ type sessionToolCallResponse struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
+type sessionConfigResponse struct {
+	ProviderName     string `json:"provider_name,omitempty"`
+	MaxSteps         int    `json:"max_steps,omitempty"`
+	HasSessionPrompt bool   `json:"has_session_prompt,omitempty"`
+}
+
 type runRequest struct {
-	Input string `json:"input"`
+	Input        string `json:"input"`
+	ProviderName string `json:"provider_name"`
 }
 
 type runResponse struct {
@@ -108,7 +120,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 	if title == "" {
 		title = strings.TrimSpace(req.Input)
 	}
-	meta, err := h.service.Create(ctx.Request.Context(), title)
+	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SessionPrompt})
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
@@ -151,10 +163,14 @@ func (h *SessionHandler) Run(ctx *gin.Context) {
 		writeError(ctx, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := h.service.Run(ctx.Request.Context(), ctx.Param("id"), req.Input)
+	result, err := h.service.Run(ctx.Request.Context(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
 	if err != nil {
 		if session.IsNotFound(err) {
 			writeError(ctx, http.StatusNotFound, err.Error())
+			return
+		}
+		if appservice.IsProviderSelectionError(err) {
+			writeError(ctx, http.StatusBadRequest, err.Error())
 			return
 		}
 		writeError(ctx, http.StatusInternalServerError, err.Error())
@@ -170,7 +186,7 @@ func (h *SessionHandler) Stream(ctx *gin.Context) {
 		writeError(ctx, http.StatusBadRequest, err.Error())
 		return
 	}
-	events, err := h.service.Stream(ctx.Request.Context(), ctx.Param("id"), req.Input)
+	events, err := h.service.Stream(ctx.Request.Context(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
 	if err != nil {
 		writeStreamError(ctx, err.Error())
 		return
@@ -206,6 +222,7 @@ func newSessionResponse(meta appservice.SessionMeta) sessionResponse {
 		Title:     meta.Title,
 		CreatedAt: meta.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: meta.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		Config:    newSessionConfigResponse(meta.Config),
 	}
 }
 
@@ -215,12 +232,21 @@ func newSessionDetailResponse(detail appservice.SessionDetail) sessionDetailResp
 		Title:     detail.Title,
 		CreatedAt: detail.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: detail.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		Config:    newSessionConfigResponse(detail.Config),
 		Messages:  make([]sessionMessageResponse, 0, len(detail.Messages)),
 	}
 	for _, message := range detail.Messages {
 		out.Messages = append(out.Messages, newSessionMessageResponse(message))
 	}
 	return out
+}
+
+func newSessionConfigResponse(cfg session.SessionConfig) sessionConfigResponse {
+	return sessionConfigResponse{
+		ProviderName:     cfg.ProviderName,
+		MaxSteps:         cfg.MaxSteps,
+		HasSessionPrompt: strings.TrimSpace(cfg.SessionPrompt) != "",
+	}
 }
 
 func newSessionMessageResponse(message appservice.SessionMessage) sessionMessageResponse {

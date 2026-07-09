@@ -16,6 +16,9 @@ func NewFakeProvider(cfg ProviderConfig) (Provider, error) {
 }
 
 func (p *FakeProvider) fakeChatMessage(req ChatRequest) Message {
+	if p.model == "fake-two-tool-model" {
+		return fakeTwoToolChatMessage(req)
+	}
 	// 如果最后一个用户问题询问上一轮结果，则从恢复的工具历史中回答。
 	if asksPreviousResult(req.Messages) {
 		for i := len(req.Messages) - 1; i >= 0; i-- {
@@ -48,6 +51,36 @@ func (p *FakeProvider) fakeChatMessage(req ChatRequest) Message {
 			},
 		}},
 	}
+}
+
+func fakeTwoToolChatMessage(req ChatRequest) Message {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		msg := req.Messages[i]
+		if msg.Role != RoleTool {
+			continue
+		}
+		switch strings.TrimSpace(msg.Content) {
+		case "5":
+			return Message{Role: RoleAssistant, ToolCalls: []ToolCall{{
+				ID:   "call_fake_calculator_multiply",
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      "calculator",
+					Arguments: `{"a":5,"b":4,"op":"mul"}`,
+				},
+			}}}
+		case "20":
+			return Message{Role: RoleAssistant, Content: "final answer: 20"}
+		}
+	}
+	return Message{Role: RoleAssistant, ToolCalls: []ToolCall{{
+		ID:   "call_fake_calculator_add",
+		Type: "function",
+		Function: ToolCallFunction{
+			Name:      "calculator",
+			Arguments: `{"a":2,"b":3,"op":"add"}`,
+		},
+	}}}
 }
 
 func asksPreviousResult(messages []Message) bool {

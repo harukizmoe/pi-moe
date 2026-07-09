@@ -13,10 +13,11 @@ type SessionMeta = session.SessionMeta
 
 // SessionStore 定义 session metadata 的数据层边界。
 type SessionStore interface {
-	Create(ctx context.Context, title string) (SessionMeta, error)
+	Create(ctx context.Context, title string, config session.SessionConfig) (SessionMeta, error)
 	Resolve(ctx context.Context, id string) (SessionMeta, error)
 	List(ctx context.Context) ([]SessionMeta, error)
 	Touch(ctx context.Context, id string) error
+	UpdateConfig(ctx context.Context, id string, config session.SessionConfig) error
 }
 
 // ManagerSessionStore 使用现有 session.Manager 适配数据层接口。
@@ -30,11 +31,11 @@ func NewManagerSessionStore(root string) *ManagerSessionStore {
 }
 
 // Create 创建一条 session metadata 记录。
-func (s *ManagerSessionStore) Create(ctx context.Context, title string) (SessionMeta, error) {
+func (s *ManagerSessionStore) Create(ctx context.Context, title string, config session.SessionConfig) (SessionMeta, error) {
 	if s == nil || s.manager == nil {
 		return SessionMeta{}, fmt.Errorf("session store is nil")
 	}
-	return s.manager.Create(ctx, title)
+	return s.manager.Create(ctx, title, config)
 }
 
 // Resolve 根据 id 查询 session metadata。
@@ -65,4 +66,15 @@ func (s *ManagerSessionStore) Touch(ctx context.Context, id string) error {
 		return fmt.Errorf("session id must not be empty")
 	}
 	return s.manager.Touch(ctx, id)
+}
+
+// UpdateConfig 更新 session 的可恢复运行偏好。
+func (s *ManagerSessionStore) UpdateConfig(ctx context.Context, id string, config session.SessionConfig) error {
+	if s == nil || s.manager == nil {
+		return fmt.Errorf("session store is nil")
+	}
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("session id must not be empty")
+	}
+	return s.manager.UpdateConfig(ctx, id, config)
 }

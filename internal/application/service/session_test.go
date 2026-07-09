@@ -3,6 +3,9 @@ package service_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +14,7 @@ import (
 
 	appdata "harukizmoe/pimoe/internal/application/data"
 	appservice "harukizmoe/pimoe/internal/application/service"
+	"harukizmoe/pimoe/internal/session"
 )
 
 func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
@@ -61,6 +65,340 @@ func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
 	step := result.ToolSteps[0]
 	if step.ToolName != "calculator" || step.Arguments != `{"a":13,"b":7,"op":"mul"}` || step.Result != "91" {
 		t.Fatalf("Run() ToolSteps[0] = %#v, want calculator args/result", step)
+	}
+}
+
+func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeProvidersConfig(t),
+		ProviderName:       "fake-local",
+		MaxSteps:           3,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	created, err := svc.Create(ctx, "prompt")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.ProviderName != "fake-local" || created.Config.MaxSteps != 3 {
+		t.Fatalf("Create() Config = %#v, want provider fake-local and max_steps 3", created.Config)
+	}
+}
+
+func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithoutPersistingPrompts(t *testing.T) {
+	ctx := context.Background()
+	basePrompt := "project base prompt"
+	sessionPrompt := "private managed run session prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+		BaseSystemPrompt:   basePrompt,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed run", appservice.CreateOptions{SessionPrompt: sessionPrompt})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SessionPrompt != sessionPrompt {
+		t.Fatalf("created SessionPrompt = %q, want stored session prompt", created.Config.SessionPrompt)
+	}
+
+	result, err := svc.Run(ctx, created.ID, "hello from managed run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Answer != "managed answer" {
+		t.Fatalf("Run() Answer = %q, want managed answer", result.Answer)
+	}
+	captured := receiveOpenAIRequest(t, requests)
+	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed run")
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if detail.Config.SessionPrompt != sessionPrompt {
+		t.Fatalf("detail SessionPrompt = %q, want stored session prompt", detail.Config.SessionPrompt)
+	}
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed run")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, sessionPrompt, "hello from managed run")
+}
+
+func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t *testing.T) {
+	ctx := context.Background()
+	basePrompt := "private service base prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+		BaseSystemPrompt:   basePrompt,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed base")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SessionPrompt != "" {
+		t.Fatalf("created SessionPrompt = %q, want no stored session prompt", created.Config.SessionPrompt)
+	}
+
+	if _, err := svc.Run(ctx, created.ID, "hello from managed base"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	captured := receiveOpenAIRequest(t, requests)
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, basePrompt, "hello from managed base")
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if detail.Config.SessionPrompt != "" {
+		t.Fatalf("detail SessionPrompt = %q, want no stored session prompt", detail.Config.SessionPrompt)
+	}
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed base")
+}
+
+func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWithoutPersistingPrompts(t *testing.T) {
+	ctx := context.Background()
+	basePrompt := "project base prompt"
+	sessionPrompt := "private managed stream session prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+		BaseSystemPrompt:   basePrompt,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed stream", appservice.CreateOptions{SessionPrompt: sessionPrompt})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SessionPrompt != sessionPrompt {
+		t.Fatalf("created SessionPrompt = %q, want stored session prompt", created.Config.SessionPrompt)
+	}
+
+	events, err := svc.Stream(ctx, created.ID, "hello from managed stream")
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	got := collectStreamEvents(t, events)
+	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "managed answer"})
+	captured := receiveOpenAIRequest(t, requests)
+	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed stream")
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if detail.Config.SessionPrompt != sessionPrompt {
+		t.Fatalf("detail SessionPrompt = %q, want stored session prompt", detail.Config.SessionPrompt)
+	}
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed stream")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, sessionPrompt, "hello from managed stream")
+}
+
+func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+
+	created, err := svc.Create(ctx, "pin default provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.ProviderName != "fake-local" {
+		t.Fatalf("Create() ProviderName = %q, want resolved default fake-local", created.Config.ProviderName)
+	}
+
+	if err := os.WriteFile(configPath, []byte(`llms:
+  default_provider: fake-alt
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`), 0o600); err != nil {
+		t.Fatalf("rewrite providers config: %v", err)
+	}
+	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	if err != nil {
+		t.Fatalf("Run() after default_provider change error = %v", err)
+	}
+	if result.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run() Answer = %q, want pinned fake provider answer", result.Answer)
+	}
+}
+
+func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-old:
+      type: openai_compatible
+      model: bad
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "switch provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	result, err := svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	if err != nil {
+		t.Fatalf("Run() override error = %v", err)
+	}
+	if result.Answer != "13 * 7 = 91" {
+		t.Fatalf("Run() Answer = %q, want calculator answer", result.Answer)
+	}
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-new" {
+		t.Fatalf("persisted ProviderName = %q, want fake-new", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-old:
+      type: openai_compatible
+      model: bad
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "stream switch provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	events, err := svc.Stream(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "fake-new"})
+	if err != nil {
+		t.Fatalf("Stream() override error = %v", err)
+	}
+	got := collectStreamEvents(t, events)
+	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "13 * 7 = 91"})
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-new" {
+		t.Fatalf("persisted ProviderName = %q, want fake-new", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFailure(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-old
+  providers:
+    fake-old:
+      type: fake
+      model: fake-tool-model
+`)
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "failed provider switch")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, err = svc.Run(ctx, created.ID, "use calculator to compute 13 * 7", appservice.RunOptions{ProviderName: "missing-provider"})
+	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
+		t.Fatalf("Run() error = %v, want unknown provider error", err)
+	}
+	resolved, err := store.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-old" {
+		t.Fatalf("persisted ProviderName = %q, want fake-old after failed run", resolved.Config.ProviderName)
+	}
+}
+
+func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testing.T) {
+	ctx := context.Background()
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	configPath := writeProvidersConfigContent(t, `llms:
+  default_provider: fake-new
+  providers:
+    fake-new:
+      type: fake
+      model: fake-tool-model
+`)
+	creator, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "missing-provider"})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := creator.Create(ctx, "missing provider")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	_, err = creator.Run(ctx, created.ID, "use calculator to compute 13 * 7")
+	if err == nil || !strings.Contains(err.Error(), `session "`+created.ID+`" provider "missing-provider" is not configured; specify provider_name to choose another provider`) {
+		t.Fatalf("Run() error = %v, want actionable missing provider error", err)
 	}
 }
 
@@ -213,7 +551,7 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "sessions")
 	store := appdata.NewManagerSessionStore(root)
-	created, err := store.Create(ctx, "malformed tool args")
+	created, err := store.Create(ctx, "malformed tool args", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -241,6 +579,113 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 	}
 	if !strings.Contains(string(payload), `"Arguments":"{bad json"`) {
 		t.Fatalf("marshaled messages = %s, want malformed arguments preserved as JSON string", payload)
+	}
+}
+
+type capturedOpenAIChatRequest struct {
+	Messages []capturedOpenAIChatMessage `json:"messages"`
+}
+
+type capturedOpenAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+}
+
+func newCapturingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan capturedOpenAIChatRequest) {
+	t.Helper()
+	requests := make(chan capturedOpenAIChatRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var captured capturedOpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode OpenAI-compatible request: %v", err)
+		}
+		requests <- captured
+		writeServiceOpenAISSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			`{"choices":[{"delta":{"content":"managed answer"}}]}`,
+			`{"choices":[{"finish_reason":"stop"}]}`,
+		)
+	}))
+	return server, requests
+}
+
+func writeOpenAICompatibleProvidersConfig(t *testing.T, baseURL string) string {
+	t.Helper()
+	return writeProvidersConfigContent(t, fmt.Sprintf(`llms:
+  default_provider: test-openai
+  providers:
+    test-openai:
+      type: openai_compatible
+      base_url: %q
+      model: test-model
+      timeout_seconds: 1
+`, baseURL))
+}
+
+func writeServiceOpenAISSE(t *testing.T, w http.ResponseWriter, payloads ...string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		t.Fatal("response writer does not support flushing")
+	}
+	for _, payload := range payloads {
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			t.Fatalf("write SSE payload: %v", err)
+		}
+		flusher.Flush()
+	}
+}
+
+func receiveOpenAIRequest(t *testing.T, requests <-chan capturedOpenAIChatRequest) capturedOpenAIChatRequest {
+	t.Helper()
+	select {
+	case captured := <-requests:
+		return captured
+	default:
+		t.Fatal("OpenAI-compatible server did not receive a chat completions request")
+		return capturedOpenAIChatRequest{}
+	}
+}
+
+func sessionPromptProviderContent(prompt string) string {
+	return "Session prompt:\n" + prompt
+}
+
+func assertProviderReceivedSystemMessageBeforeUser(t *testing.T, messages []capturedOpenAIChatMessage, providerPrompt string, userPrompt string) {
+	t.Helper()
+	if len(messages) < 2 {
+		t.Fatalf("provider messages = %#v, want system message followed by user prompt", messages)
+	}
+	if messages[0].Role != "system" || messages[0].Content != providerPrompt {
+		t.Fatalf("first provider message = %#v, want provider prompt %q", messages[0], providerPrompt)
+	}
+	if messages[1].Role != "user" || messages[1].Content != userPrompt {
+		t.Fatalf("second provider message = %#v, want user prompt %q", messages[1], userPrompt)
+	}
+}
+
+func assertTranscriptDoesNotIncludeProviderPrompt(t *testing.T, messages []appservice.SessionMessage, providerPrompt string, userPrompt string) {
+	t.Helper()
+	if len(messages) != 2 {
+		t.Fatalf("detail Messages len = %d, want user and assistant only: %#v", len(messages), messages)
+	}
+	if messages[0].Role != "user" || messages[0].Content != userPrompt {
+		t.Fatalf("first transcript message = %#v, want user prompt %q", messages[0], userPrompt)
+	}
+	if messages[1].Role != "assistant" || messages[1].Content != "managed answer" {
+		t.Fatalf("second transcript message = %#v, want assistant managed answer", messages[1])
+	}
+	for _, message := range messages {
+		if message.Role == "system" || strings.Contains(message.Content, providerPrompt) {
+			t.Fatalf("transcript leaks provider prompt %q in %#v", providerPrompt, messages)
+		}
 	}
 }
 

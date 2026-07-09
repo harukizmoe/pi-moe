@@ -182,6 +182,7 @@ func TestParseCLIOptionsRejectsConflictingSessionLifecycleFlags(t *testing.T) {
 		{name: "list and session", args: []string{"--list-sessions", "--session", "manual.jsonl"}},
 		{name: "list and new", args: []string{"--list-sessions", "--new-session"}},
 		{name: "list and resume", args: []string{"--list-sessions", "--resume", "abc"}},
+		{name: "list and session prompt", args: []string{"--list-sessions", "--session-prompt", "x"}},
 	}
 
 	for _, tt := range tests {
@@ -365,6 +366,369 @@ func TestCLIManagedSessionNewAndResumeReuseTranscript(t *testing.T) {
 	}
 }
 
+func TestNewCLISessionStoresProviderPreference(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config.ProviderName != "fake-local" {
+		t.Fatalf("ProviderName = %q, want fake-local", meta.Config.ProviderName)
+	}
+}
+
+func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts := cliOptions{configPath: providerConfigPath, newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config.ProviderName != "fake-local" {
+		t.Fatalf("ProviderName = %q, want resolved default fake-local", meta.Config.ProviderName)
+	}
+
+	if err := os.WriteFile(providerConfigPath, []byte(`llms:
+  default_provider: fake-alt
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+    fake-alt:
+      type: openai_compatible
+      model: broken-default-model
+`), 0o600); err != nil {
+		t.Fatalf("rewrite providers config: %v", err)
+	}
+	resumeOpts := cliOptions{configPath: providerConfigPath, resumeSessionID: managed.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	resumedRunner, resumedManaged, err := newCLISessionWithRoot(ctx, resumeOpts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() resume error = %v", err)
+	}
+	if resumedRunner == nil || resumedManaged == nil {
+		t.Fatalf("resumed runner/managed = %#v/%#v, want managed session", resumedRunner, resumedManaged)
+	}
+	output, err := collectRunOutput(resumedRunner.Prompt(ctx, "use calculator to compute 13 * 7"))
+	if err != nil {
+		t.Fatalf("Prompt() after default_provider change error = %v", err)
+	}
+	if output.Answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want pinned fake provider answer", output.Answer)
+	}
+}
+
+func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	opts := cliOptions{configPath: providerConfigPath, resumeSessionID: created.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	output, err := collectRunOutput(runner.Prompt(ctx, "use calculator to compute 13 * 7"))
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if output.Answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want 13 * 7 = 91", output.Answer)
+	}
+}
+
+func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: missing-default
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "missing"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	opts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", resumeSessionID: created.ID, promptArgs: []string{"use calculator to compute 13 * 7"}}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() override error = %v", err)
+	}
+	if _, err := collectRunOutput(runner.Prompt(ctx, "use calculator to compute 13 * 7")); err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() error = %v", err)
+	}
+	resolved, err := manager.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.ProviderName != "fake-local" {
+		t.Fatalf("persisted ProviderName = %q, want fake-local", resolved.Config.ProviderName)
+	}
+}
+
+func TestResumeCLISessionReportsMissingStoredProviderWithOverrideGuidance(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "removed-provider"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	opts := cliOptions{configPath: providerConfigPath, resumeSessionID: created.ID, promptArgs: []string{"hello"}}
+	_, _, err = newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, "")
+	if err == nil {
+		t.Fatal("newCLISessionWithRoot() error = nil, want missing stored provider error")
+	}
+	want := `session "` + created.ID + `" provider "removed-provider" is not configured; specify --provider to choose another provider`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestParseCLIOptionsAcceptsManagedPreferenceFlags(t *testing.T) {
+	got, err := parseCLIOptions([]string{
+		"--max-steps", "2",
+		"--session-prompt", "answer like a careful calculator",
+		"--new-session",
+		"compute (2 + 3) * 4",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if gotMaxSteps := cliOptionInt(t, got, "maxSteps"); gotMaxSteps != 2 {
+		t.Fatalf("maxSteps = %d, want 2", gotMaxSteps)
+	}
+	if gotSessionPrompt := cliOptionString(t, got, "sessionPrompt"); gotSessionPrompt != "answer like a careful calculator" {
+		t.Fatalf("sessionPrompt = %q, want stored flag value", gotSessionPrompt)
+	}
+}
+
+func TestNewCLISessionPersistsManagedPreferenceFlags(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	opts, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--provider", "fake-local",
+		"--max-steps", "2",
+		"--session-prompt", "answer with only the final result",
+		"--new-session",
+		"use calculator to compute 13 * 7",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+	input, err := readInput(opts.promptArgs, strings.NewReader("ignored stdin"))
+	if err != nil {
+		t.Fatalf("readInput() error = %v", err)
+	}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, input)
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	output, err := collectRunOutput(runner.Prompt(ctx, input))
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if output.Answer != "13 * 7 = 91" {
+		t.Fatalf("answer = %q, want 13 * 7 = 91", output.Answer)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() error = %v", err)
+	}
+
+	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config.MaxSteps != 2 {
+		t.Fatalf("persisted MaxSteps = %d, want 2", meta.Config.MaxSteps)
+	}
+	if meta.Config.SessionPrompt != "answer with only the final result" {
+		t.Fatalf("persisted SessionPrompt = %q, want flag value", meta.Config.SessionPrompt)
+	}
+	messages, err := session.LoadMessages(meta.Path)
+	if err != nil {
+		t.Fatalf("LoadMessages() error = %v", err)
+	}
+	if got := collectUserPrompts(messages); !reflect.DeepEqual(got, []string{"use calculator to compute 13 * 7"}) {
+		t.Fatalf("persisted user prompts = %#v, want only CLI input", got)
+	}
+}
+
+func TestResumeCLISessionUsesStoredMaxStepsPreference(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-two-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	newOpts, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--provider", "fake-local",
+		"--max-steps", "1",
+		"--new-session",
+		"session title",
+	})
+	if err != nil {
+		t.Fatalf("parse new options: %v", err)
+	}
+	_, managed, err := newCLISessionWithRoot(ctx, newOpts, logger.NewNoop(), root, strings.Join(newOpts.promptArgs, " "))
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() new error = %v", err)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() new error = %v", err)
+	}
+
+	resumeOpts, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--resume", managed.ID,
+		"compute (2 + 3) * 4",
+	})
+	if err != nil {
+		t.Fatalf("parse resume options: %v", err)
+	}
+	runner, resumed, err := newCLISessionWithRoot(ctx, resumeOpts, logger.NewNoop(), root, strings.Join(resumeOpts.promptArgs, " "))
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() resume error = %v", err)
+	}
+	if resumed == nil || resumed.ID != managed.ID {
+		t.Fatalf("resumed managed session = %#v, want id %q", resumed, managed.ID)
+	}
+	output, err := collectRunOutput(runner.Prompt(ctx, "compute (2 + 3) * 4"))
+	if err == nil {
+		t.Fatalf("Prompt() error = nil with output %#v, want stored max-steps error", output)
+	}
+	if !strings.Contains(err.Error(), "max steps") {
+		t.Fatalf("Prompt() error = %v, want max steps", err)
+	}
+}
+
+func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-two-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	opts, err := parseCLIOptions([]string{
+		"--config", providerConfigPath,
+		"--max-steps", "2",
+		"--session-prompt", "override prompt",
+		"--resume", created.ID,
+		"compute (2 + 3) * 4",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+	runner, managed, err := newCLISessionWithRoot(ctx, opts, logger.NewNoop(), root, strings.Join(opts.promptArgs, " "))
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() error = %v", err)
+	}
+	output, err := collectRunOutput(runner.Prompt(ctx, "compute (2 + 3) * 4"))
+	if err != nil {
+		t.Fatalf("Prompt() error = %v", err)
+	}
+	if output.Answer != "final answer: 20" {
+		t.Fatalf("answer = %q, want final answer: 20", output.Answer)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() error = %v", err)
+	}
+	resolved, err := manager.Resolve(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Config.MaxSteps != 2 {
+		t.Fatalf("persisted MaxSteps = %d, want override 2", resolved.Config.MaxSteps)
+	}
+	if resolved.Config.SessionPrompt != "override prompt" {
+		t.Fatalf("persisted SessionPrompt = %q, want override prompt", resolved.Config.SessionPrompt)
+	}
+}
+
 func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	ctx := context.Background()
 	providerConfigPath := writeCLIProvidersConfig(t, `llms:
@@ -466,11 +830,11 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)
-	first, err := manager.Create(context.Background(), "first prompt")
+	first, err := manager.Create(context.Background(), "first prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
-	second, err := manager.Create(context.Background(), "second prompt")
+	second, err := manager.Create(context.Background(), "second prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}
@@ -665,6 +1029,30 @@ func eventStream(events ...session.Event) <-chan session.Event {
 	}
 	close(stream)
 	return stream
+}
+
+func cliOptionInt(t *testing.T, opts cliOptions, name string) int {
+	t.Helper()
+	field := reflect.ValueOf(opts).FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("cliOptions.%s is missing", name)
+	}
+	if field.Kind() != reflect.Int {
+		t.Fatalf("cliOptions.%s kind = %s, want int", name, field.Kind())
+	}
+	return int(field.Int())
+}
+
+func cliOptionString(t *testing.T, opts cliOptions, name string) string {
+	t.Helper()
+	field := reflect.ValueOf(opts).FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("cliOptions.%s is missing", name)
+	}
+	if field.Kind() != reflect.String {
+		t.Fatalf("cliOptions.%s kind = %s, want string", name, field.Kind())
+	}
+	return field.String()
 }
 
 func writeCLIProvidersConfig(t *testing.T, content string) string {

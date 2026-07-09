@@ -74,6 +74,36 @@ func toLLMMessages(messages []Message) ([]llms.Message, error) {
 	return out, nil
 }
 
+func toLLMMessagesWithPrompts(messages []Message, basePrompt string, sessionPrompt string) ([]llms.Message, error) {
+	converted, err := toLLMMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+	prompt := combineProviderPrompts(basePrompt, sessionPrompt)
+	if prompt == "" {
+		return converted, nil
+	}
+	out := make([]llms.Message, 0, len(converted)+1)
+	out = append(out, llms.Message{Role: llms.RoleSystem, Content: prompt})
+	out = append(out, converted...)
+	return out, nil
+}
+
+func combineProviderPrompts(basePrompt string, sessionPrompt string) string {
+	base := strings.TrimSpace(basePrompt)
+	session := strings.TrimSpace(sessionPrompt)
+	if base == "" && session == "" {
+		return ""
+	}
+	if base == "" {
+		return "Session prompt:\n" + session
+	}
+	if session == "" {
+		return base
+	}
+	return base + "\n\nSession prompt:\n" + session
+}
+
 func validateToolResultOrder(index int, message llms.Message, pendingToolCalls []llms.ToolCall) error {
 	switch message.Role {
 	case llms.RoleAssistant:

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,7 +15,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := NewManager(root)
 
-	first, err := manager.Create(context.Background(), "  first prompt\nwith second line  ")
+	first, err := manager.Create(context.Background(), "  first prompt\nwith second line  ", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
@@ -34,7 +35,7 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 		t.Fatalf("index.json stat error = %v", err)
 	}
 
-	second, err := manager.Create(context.Background(), "second prompt")
+	second, err := manager.Create(context.Background(), "second prompt", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}
@@ -68,10 +69,121 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 	}
 }
 
+func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
+	cfg := SessionConfig{ProviderName: "deepseek", SessionPrompt: "be concise", MaxSteps: 4}
+
+	created, err := manager.Create(context.Background(), "prompt", cfg)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if !reflect.DeepEqual(created.Config, cfg) {
+		t.Fatalf("Create() Config = %#v, want %#v", created.Config, cfg)
+	}
+
+	resolved, err := manager.Resolve(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !reflect.DeepEqual(resolved.Config, cfg) {
+		t.Fatalf("Resolve() Config = %#v, want %#v", resolved.Config, cfg)
+	}
+	if resolved.Config.SessionPrompt != "be concise" {
+		t.Fatalf("SessionPrompt = %q, want be concise", resolved.Config.SessionPrompt)
+	}
+	indexBytes, err := os.ReadFile(filepath.Join(manager.root, "index.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(index) error = %v", err)
+	}
+	indexJSON := string(indexBytes)
+	if !strings.Contains(indexJSON, `"session_prompt": "be concise"`) {
+		t.Fatalf("index JSON = %s, want session_prompt", indexJSON)
+	}
+	assertOnlySessionConfigFields(t, indexBytes)
+
+	listed, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(listed) != 1 || !reflect.DeepEqual(listed[0].Config, cfg) {
+		t.Fatalf("List() = %#v, want config %#v", listed, cfg)
+	}
+}
+
+func assertOnlySessionConfigFields(t *testing.T, indexBytes []byte) {
+	t.Helper()
+
+	var index struct {
+		Sessions []struct {
+			Config map[string]json.RawMessage `json:"config"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatalf("decode index JSON error = %v; body = %s", err, indexBytes)
+	}
+	if len(index.Sessions) != 1 {
+		t.Fatalf("index sessions len = %d, want 1", len(index.Sessions))
+	}
+	allowed := map[string]struct{}{
+		"provider_name":  {},
+		"session_prompt": {},
+		"max_steps":      {},
+	}
+	for field := range index.Sessions[0].Config {
+		if _, ok := allowed[field]; !ok {
+			t.Fatalf("config exposes unexpected field %q in %s", field, indexBytes)
+		}
+	}
+}
+
+func TestManagerUpdateConfigPersistsPreferenceAndTouchesSession(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
+	created, err := manager.Create(context.Background(), "prompt", SessionConfig{ProviderName: "old"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	updatedCfg := SessionConfig{ProviderName: "new", SessionPrompt: "keep", MaxSteps: 2}
+
+	if err := manager.UpdateConfig(context.Background(), created.ID, updatedCfg); err != nil {
+		t.Fatalf("UpdateConfig() error = %v", err)
+	}
+	resolved, err := manager.Resolve(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !reflect.DeepEqual(resolved.Config, updatedCfg) {
+		t.Fatalf("Resolve() Config = %#v, want %#v", resolved.Config, updatedCfg)
+	}
+	if !resolved.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("UpdateConfig() UpdatedAt = %v, want after %v", resolved.UpdatedAt, created.UpdatedAt)
+	}
+}
+
+func TestManagerReadsLegacyIndexWithoutConfig(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	createdAt := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	legacy := `{"current":"legacy","sessions":[{"id":"legacy","path":"` + filepath.Join(root, "legacy.jsonl") + `","title":"legacy session","created_at":"` + createdAt.Format(time.RFC3339) + `","updated_at":"` + createdAt.Format(time.RFC3339) + `"}]}`
+	if err := os.WriteFile(filepath.Join(root, "index.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy index: %v", err)
+	}
+
+	meta, err := NewManager(root).Resolve(context.Background(), "legacy")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if meta.Config != (SessionConfig{}) {
+		t.Fatalf("Resolve() Config = %#v, want empty legacy config", meta.Config)
+	}
+}
+
 func TestManagerCreateUsesUntitledSessionForBlankTitle(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	meta, err := manager.Create(context.Background(), " \n\t ")
+	meta, err := manager.Create(context.Background(), " \n\t ", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -138,7 +250,7 @@ func TestManagerTouchMissingSessionReturnsError(t *testing.T) {
 func TestManagerTimestampsAreUTC(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 
-	meta, err := manager.Create(context.Background(), "prompt")
+	meta, err := manager.Create(context.Background(), "prompt", SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}

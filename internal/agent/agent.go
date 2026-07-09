@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/tools"
@@ -14,15 +16,21 @@ type Options struct {
 	Logger logger.Logger
 	// MaxSteps 限制一次 Run 中最多执行多少轮 tool calling；小于 1 时使用默认值。
 	MaxSteps int
+	// BaseSystemPrompt 是所有请求共享的系统级指令；不会进入调用方 transcript。
+	BaseSystemPrompt string
+	// SessionPrompt 是当前 session 的行为设定，会追加在基础系统指令之后。
+	SessionPrompt string
 }
 
 // Agent 负责驱动一次基于事件流的 tool calling 主循环。
 type Agent struct {
-	provider llms.Provider
-	tools    *tools.Registry
-	model    string
-	logger   logger.Logger
-	maxSteps int
+	provider      llms.Provider
+	tools         *tools.Registry
+	model         string
+	logger        logger.Logger
+	maxSteps      int
+	basePrompt    string
+	sessionPrompt string
 }
 
 // New 创建一个绑定固定 Provider、工具注册表和模型名的 Agent。
@@ -45,12 +53,16 @@ func NewWithOptions(provider llms.Provider, tools *tools.Registry, model string,
 	if maxSteps < 1 {
 		maxSteps = defaultMaxSteps
 	}
+	basePrompt := strings.TrimSpace(opts.BaseSystemPrompt)
+	sessionPrompt := strings.TrimSpace(opts.SessionPrompt)
 
 	return &Agent{
-		provider: provider,
-		tools:    tools,
-		model:    model,
-		logger:   log,
-		maxSteps: maxSteps,
+		provider:      provider,
+		tools:         tools,
+		model:         model,
+		logger:        log,
+		maxSteps:      maxSteps,
+		basePrompt:    basePrompt,
+		sessionPrompt: sessionPrompt,
 	}
 }

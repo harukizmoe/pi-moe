@@ -76,7 +76,7 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Ev
 	}
 
 	for chatRound := 0; ; chatRound++ {
-		llmMessages, err := toLLMMessages(messages)
+		llmMessages, err := toLLMMessagesWithPrompts(messages, a.basePrompt, a.sessionPrompt)
 		if err != nil {
 			emit(ErrorEvent{RunID: runID, Error: err})
 			return
