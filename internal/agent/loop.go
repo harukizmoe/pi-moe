@@ -35,7 +35,7 @@ func newRunID() string {
 	return fmt.Sprintf("run-%d", nextRunSequence.Add(1))
 }
 
-func (a *Agent) stream(ctx context.Context, messages []Message, stream chan<- Event) {
+func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Event) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -172,6 +172,9 @@ func streamAssistantMessage(ctx context.Context, emit func(Event) bool, provider
 					return AssistantMessage{}, ctx.Err()
 				}
 			case llms.ChatStreamEventTypeDone:
+				if err := validateProviderDoneRole(event.Message.Role); err != nil {
+					return AssistantMessage{}, err
+				}
 				assistantMessage := assistantFromLLMMessage(event.Message)
 				if err := validateAssistantMessage(assistantMessage); err != nil {
 					return AssistantMessage{}, err
@@ -226,6 +229,13 @@ func assistantFromLLMMessage(message llms.Message) AssistantMessage {
 	}
 }
 
+func validateProviderDoneRole(role llms.Role) error {
+	if role == "" || role == llms.RoleAssistant {
+		return nil
+	}
+	return fmt.Errorf("assistant response role must be empty or %q, got %q", llms.RoleAssistant, role)
+}
+
 func validateAssistantMessage(message AssistantMessage) error {
 	if _, err := toLLMMessage(message); err != nil {
 		return fmt.Errorf("assistant response: %w", err)
@@ -270,11 +280,20 @@ func cloneAssistantMessage(message AssistantMessage) AssistantMessage {
 	}
 }
 
-func emitCancellation(stream chan<- Event, event Event) {
+func emitCancellation(stream chan Event, event Event) {
 	select {
 	case stream <- event:
+		return
 	default:
 	}
+	if cap(stream) == 0 {
+		return
+	}
+	select {
+	case <-stream:
+	default:
+	}
+	stream <- event
 }
 
 func emitEvent(ctx context.Context, stream chan<- Event, event Event) bool {

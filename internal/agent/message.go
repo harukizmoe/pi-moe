@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -145,6 +146,9 @@ func toLLMMessage(message Message) (llms.Message, error) {
 			if strings.TrimSpace(call.Function.Name) == "" {
 				return llms.Message{}, fmt.Errorf("assistant tool call must have function name")
 			}
+			if err := validateToolCallArguments(call.Function.Arguments); err != nil {
+				return llms.Message{}, err
+			}
 		}
 		return llms.Message{Role: llms.RoleAssistant, Content: msg.Content, ToolCalls: toolCalls}, nil
 	case ToolResultMessage:
@@ -158,4 +162,12 @@ func toLLMMessage(message Message) (llms.Message, error) {
 	default:
 		return llms.Message{}, fmt.Errorf("unsupported agent message type %T", message)
 	}
+}
+
+func validateToolCallArguments(arguments string) error {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" || !json.Valid([]byte(trimmed)) {
+		return fmt.Errorf("assistant tool call arguments must be valid JSON")
+	}
+	return nil
 }

@@ -34,17 +34,17 @@ type Agent struct {
 }
 
 // New 创建一个绑定固定 Provider、工具注册表和模型名的 Agent。
-func New(provider llms.Provider, tools *tools.Registry, model string) *Agent {
-	return NewWithOptions(provider, tools, model, Options{})
+func New(provider llms.Provider, registry *tools.Registry, model string) *Agent {
+	return NewWithOptions(provider, registry, model, Options{})
 }
 
 // NewWithLogger 创建一个带显式 logger 的 Agent。
-func NewWithLogger(provider llms.Provider, tools *tools.Registry, model string, log logger.Logger) *Agent {
-	return NewWithOptions(provider, tools, model, Options{Logger: log})
+func NewWithLogger(provider llms.Provider, registry *tools.Registry, model string, log logger.Logger) *Agent {
+	return NewWithOptions(provider, registry, model, Options{Logger: log})
 }
 
 // NewWithOptions 创建一个带显式运行选项的 Agent。
-func NewWithOptions(provider llms.Provider, tools *tools.Registry, model string, opts Options) *Agent {
+func NewWithOptions(provider llms.Provider, registry *tools.Registry, model string, opts Options) *Agent {
 	log := opts.Logger
 	if log == nil {
 		log = logger.NewNoop()
@@ -55,10 +55,13 @@ func NewWithOptions(provider llms.Provider, tools *tools.Registry, model string,
 	}
 	basePrompt := strings.TrimSpace(opts.BaseSystemPrompt)
 	sessionPrompt := strings.TrimSpace(opts.SessionPrompt)
+	if registry == nil {
+		registry = tools.NewRegistry()
+	}
 
 	return &Agent{
 		provider:      provider,
-		tools:         tools,
+		tools:         registry,
 		model:         model,
 		logger:        log,
 		maxSteps:      maxSteps,
