@@ -24,13 +24,13 @@ type Options struct {
 
 // Agent 负责驱动一次基于事件流的 tool calling 主循环。
 type Agent struct {
-	provider         llms.Provider
-	tools            *tools.Registry
-	model            string
-	logger           logger.Logger
-	maxSteps         int
-	baseSystemPrompt string
-	sessionPrompt    string
+	provider      llms.Provider
+	tools         *tools.Registry
+	model         string
+	logger        logger.Logger
+	maxSteps      int
+	basePrompt    string
+	sessionPrompt string
 }
 
 // New 创建一个绑定固定 Provider、工具注册表和模型名的 Agent。
@@ -53,16 +53,16 @@ func NewWithOptions(provider llms.Provider, tools *tools.Registry, model string,
 	if maxSteps < 1 {
 		maxSteps = defaultMaxSteps
 	}
-	baseSystemPrompt := strings.TrimSpace(opts.BaseSystemPrompt)
+	basePrompt := strings.TrimSpace(opts.BaseSystemPrompt)
 	sessionPrompt := strings.TrimSpace(opts.SessionPrompt)
 
 	return &Agent{
-		provider:         provider,
-		tools:            tools,
-		model:            model,
-		logger:           log,
-		maxSteps:         maxSteps,
-		baseSystemPrompt: baseSystemPrompt,
-		sessionPrompt:    sessionPrompt,
+		provider:      provider,
+		tools:         tools,
+		model:         model,
+		logger:        log,
+		maxSteps:      maxSteps,
+		basePrompt:    basePrompt,
+		sessionPrompt: sessionPrompt,
 	}
 }

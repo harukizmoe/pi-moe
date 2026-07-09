@@ -150,7 +150,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 		root:               filepath.Join(t.TempDir(), "sessions"),
 		providerConfigPath: configPath,
 		providerName:       "fake-local",
-		systemPrompt:       "private system prompt",
+		basePrompt:         "private system prompt",
 		maxSteps:           4,
 	})
 
@@ -161,8 +161,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	assertBodyContains(t, createdBody, `"max_steps":4`)
 	assertBodyNotContains(t, createdBody, `"has_session_prompt"`)
 	assertBodyNotContains(t, createdBody, "private system prompt")
-	assertBodyNotContains(t, createdBody, `"session_prompt":`)
-	assertBodyNotContains(t, createdBody, `"system_prompt":`)
+	assertOnlyPublicSessionConfigFields(t, createdBody)
 	createdSession := decodeJSONString[sessionResponse](t, createdBody)
 	assertConfigSummary(t, createdSession.Config, "fake-local", 4, false)
 
@@ -171,8 +170,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	listedBody := listed.Body.String()
 	assertBodyContains(t, listedBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyNotContains(t, listedBody, "private system prompt")
-	assertBodyNotContains(t, listedBody, `"session_prompt":`)
-	assertBodyNotContains(t, listedBody, `"system_prompt":`)
+	assertOnlyPublicSessionConfigFields(t, listedBody)
 	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
 	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
 		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
@@ -184,8 +182,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	detailBody := detail.Body.String()
 	assertBodyContains(t, detailBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyNotContains(t, detailBody, "private system prompt")
-	assertBodyNotContains(t, detailBody, `"session_prompt":`)
-	assertBodyNotContains(t, detailBody, `"system_prompt":`)
+	assertOnlyPublicSessionConfigFields(t, detailBody)
 	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
 	assertConfigSummary(t, detailSession.Config, "fake-local", 4, false)
 }
@@ -219,9 +216,7 @@ func TestRouterCreateAcceptsConfigOverridesWithoutExposingSessionPrompt(t *testi
 	assertBodyContains(t, createdBody, `"max_steps":4`)
 	assertBodyContains(t, createdBody, `"has_session_prompt":true`)
 	assertBodyNotContains(t, createdBody, "private session prompt")
-	assertBodyNotContains(t, createdBody, `"session_prompt":`)
-	assertBodyNotContains(t, createdBody, `"system_prompt":`)
-	assertBodyNotContains(t, createdBody, `"has_system_prompt"`)
+	assertOnlyPublicSessionConfigFields(t, createdBody)
 	createdSession := decodeJSONString[sessionResponse](t, createdBody)
 	assertConfigSummary(t, createdSession.Config, "fake-local", 4, true)
 
@@ -230,9 +225,7 @@ func TestRouterCreateAcceptsConfigOverridesWithoutExposingSessionPrompt(t *testi
 	listedBody := listed.Body.String()
 	assertBodyContains(t, listedBody, `"provider_name":"fake-local"`)
 	assertBodyNotContains(t, listedBody, "private session prompt")
-	assertBodyNotContains(t, listedBody, `"session_prompt":`)
-	assertBodyNotContains(t, listedBody, `"system_prompt":`)
-	assertBodyNotContains(t, listedBody, `"has_system_prompt"`)
+	assertOnlyPublicSessionConfigFields(t, listedBody)
 	listedSessions := decodeJSONString[sessionsResponse](t, listedBody)
 	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
 		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
@@ -244,9 +237,7 @@ func TestRouterCreateAcceptsConfigOverridesWithoutExposingSessionPrompt(t *testi
 	detailBody := detail.Body.String()
 	assertBodyContains(t, detailBody, `"provider_name":"fake-local"`)
 	assertBodyNotContains(t, detailBody, "private session prompt")
-	assertBodyNotContains(t, detailBody, `"session_prompt":`)
-	assertBodyNotContains(t, detailBody, `"system_prompt":`)
-	assertBodyNotContains(t, detailBody, `"has_system_prompt"`)
+	assertOnlyPublicSessionConfigFields(t, detailBody)
 	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
 	assertConfigSummary(t, detailSession.Config, "fake-local", 4, true)
 }
@@ -481,7 +472,7 @@ type testRouterConfig struct {
 	root               string
 	providerConfigPath string
 	providerName       string
-	systemPrompt       string
+	basePrompt         string
 	maxSteps           int
 }
 
@@ -509,7 +500,7 @@ func newTestRouterWithConfig(t *testing.T, cfg testRouterConfig) http.Handler {
 		Store:              appdata.NewManagerSessionStore(cfg.root),
 		ProviderConfigPath: cfg.providerConfigPath,
 		ProviderName:       cfg.providerName,
-		BaseSystemPrompt:   cfg.systemPrompt,
+		BaseSystemPrompt:   cfg.basePrompt,
 		MaxSteps:           cfg.maxSteps,
 	})
 	if err != nil {
@@ -588,6 +579,57 @@ func assertConfigSummary(t *testing.T, got sessionConfigResponse, wantProvider s
 	t.Helper()
 	if got.ProviderName != wantProvider || got.MaxSteps != wantMaxSteps || got.HasSessionPrompt != wantHasSessionPrompt {
 		t.Fatalf("config = %#v, want provider %q max_steps %d has_session_prompt %t", got, wantProvider, wantMaxSteps, wantHasSessionPrompt)
+	}
+}
+
+func assertOnlyPublicSessionConfigFields(t *testing.T, body string) {
+	t.Helper()
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode response JSON error = %v; body = %q", err, body)
+	}
+
+	found := false
+	if configRaw, ok := envelope["config"]; ok {
+		found = true
+		assertPublicConfigFields(t, configRaw)
+	}
+	if sessionsRaw, ok := envelope["sessions"]; ok {
+		var sessions []map[string]json.RawMessage
+		if err := json.Unmarshal(sessionsRaw, &sessions); err != nil {
+			t.Fatalf("decode sessions JSON error = %v; body = %q", err, body)
+		}
+		for _, session := range sessions {
+			configRaw, ok := session["config"]
+			if !ok {
+				t.Fatalf("session response missing config in body:\n%s", body)
+			}
+			found = true
+			assertPublicConfigFields(t, configRaw)
+		}
+	}
+	if !found {
+		t.Fatalf("response missing public config in body:\n%s", body)
+	}
+}
+
+func assertPublicConfigFields(t *testing.T, configRaw json.RawMessage) {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(configRaw, &fields); err != nil {
+		t.Fatalf("decode config JSON error = %v; config = %s", err, configRaw)
+	}
+	allowed := map[string]struct{}{
+		"provider_name":      {},
+		"max_steps":          {},
+		"has_session_prompt": {},
+	}
+	for field := range fields {
+		if _, ok := allowed[field]; !ok {
+			t.Fatalf("config exposes unexpected field %q in %s", field, configRaw)
+		}
 	}
 }
 

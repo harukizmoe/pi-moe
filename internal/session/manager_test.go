@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -98,9 +99,7 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	if !strings.Contains(indexJSON, `"session_prompt": "be concise"`) {
 		t.Fatalf("index JSON = %s, want session_prompt", indexJSON)
 	}
-	if strings.Contains(indexJSON, "system_prompt") {
-		t.Fatalf("index JSON = %s, must not contain system_prompt", indexJSON)
-	}
+	assertOnlySessionConfigFields(t, indexBytes)
 
 	listed, err := manager.List(context.Background())
 	if err != nil {
@@ -108,6 +107,32 @@ func TestManagerCreateResolveListPersistsConfig(t *testing.T) {
 	}
 	if len(listed) != 1 || !reflect.DeepEqual(listed[0].Config, cfg) {
 		t.Fatalf("List() = %#v, want config %#v", listed, cfg)
+	}
+}
+
+func assertOnlySessionConfigFields(t *testing.T, indexBytes []byte) {
+	t.Helper()
+
+	var index struct {
+		Sessions []struct {
+			Config map[string]json.RawMessage `json:"config"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatalf("decode index JSON error = %v; body = %s", err, indexBytes)
+	}
+	if len(index.Sessions) != 1 {
+		t.Fatalf("index sessions len = %d, want 1", len(index.Sessions))
+	}
+	allowed := map[string]struct{}{
+		"provider_name":  {},
+		"session_prompt": {},
+		"max_steps":      {},
+	}
+	for field := range index.Sessions[0].Config {
+		if _, ok := allowed[field]; !ok {
+			t.Fatalf("config exposes unexpected field %q in %s", field, indexBytes)
+		}
 	}
 }
 

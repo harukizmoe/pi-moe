@@ -33,9 +33,9 @@ type SessionConfig struct {
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	store            data.SessionStore
-	config           session.Config
-	baseSystemPrompt string
+	store      data.SessionStore
+	config     session.Config
+	basePrompt string
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
@@ -196,7 +196,7 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 			Logger:             cfg.Logger,
 			MaxSteps:           cfg.MaxSteps,
 		},
-		baseSystemPrompt: strings.TrimSpace(cfg.BaseSystemPrompt),
+		basePrompt: strings.TrimSpace(cfg.BaseSystemPrompt),
 	}, nil
 }
 
@@ -312,7 +312,7 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 
 	runCfg := s.config
 	runCfg.ProviderName = providerName
-	runCfg.BaseSystemPrompt = strings.TrimSpace(s.baseSystemPrompt)
+	runCfg.BaseSystemPrompt = strings.TrimSpace(s.basePrompt)
 	if meta.Config.MaxSteps > 0 {
 		runCfg.MaxSteps = meta.Config.MaxSteps
 	}

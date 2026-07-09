@@ -74,12 +74,12 @@ func toLLMMessages(messages []Message) ([]llms.Message, error) {
 	return out, nil
 }
 
-func toLLMMessagesWithPrompts(messages []Message, baseSystemPrompt string, sessionPrompt string) ([]llms.Message, error) {
+func toLLMMessagesWithPrompts(messages []Message, basePrompt string, sessionPrompt string) ([]llms.Message, error) {
 	converted, err := toLLMMessages(messages)
 	if err != nil {
 		return nil, err
 	}
-	prompt := combineSystemPrompts(baseSystemPrompt, sessionPrompt)
+	prompt := combineProviderPrompts(basePrompt, sessionPrompt)
 	if prompt == "" {
 		return converted, nil
 	}
@@ -89,8 +89,8 @@ func toLLMMessagesWithPrompts(messages []Message, baseSystemPrompt string, sessi
 	return out, nil
 }
 
-func combineSystemPrompts(baseSystemPrompt string, sessionPrompt string) string {
-	base := strings.TrimSpace(baseSystemPrompt)
+func combineProviderPrompts(basePrompt string, sessionPrompt string) string {
+	base := strings.TrimSpace(basePrompt)
 	session := strings.TrimSpace(sessionPrompt)
 	if base == "" && session == "" {
 		return ""

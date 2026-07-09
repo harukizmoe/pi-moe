@@ -124,7 +124,7 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 	}
 	captured := receiveOpenAIRequest(t, requests)
 	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
-	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, want, "hello from managed run")
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed run")
 
 	detail, err := svc.Get(ctx, created.ID)
 	if err != nil {
@@ -133,8 +133,8 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 	if detail.Config.SessionPrompt != sessionPrompt {
 		t.Fatalf("detail SessionPrompt = %q, want stored session prompt", detail.Config.SessionPrompt)
 	}
-	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, basePrompt, "hello from managed run")
-	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, sessionPrompt, "hello from managed run")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed run")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, sessionPrompt, "hello from managed run")
 }
 
 func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t *testing.T) {
@@ -165,7 +165,7 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t
 		t.Fatalf("Run() error = %v", err)
 	}
 	captured := receiveOpenAIRequest(t, requests)
-	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, basePrompt, "hello from managed base")
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, basePrompt, "hello from managed base")
 
 	detail, err := svc.Get(ctx, created.ID)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t
 	if detail.Config.SessionPrompt != "" {
 		t.Fatalf("detail SessionPrompt = %q, want no stored session prompt", detail.Config.SessionPrompt)
 	}
-	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, basePrompt, "hello from managed base")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed base")
 }
 
 func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWithoutPersistingPrompts(t *testing.T) {
@@ -210,7 +210,7 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "managed answer"})
 	captured := receiveOpenAIRequest(t, requests)
 	want := basePrompt + "\n\nSession prompt:\n" + sessionPrompt
-	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, want, "hello from managed stream")
+	assertProviderReceivedSystemMessageBeforeUser(t, captured.Messages, want, "hello from managed stream")
 
 	detail, err := svc.Get(ctx, created.ID)
 	if err != nil {
@@ -219,8 +219,8 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 	if detail.Config.SessionPrompt != sessionPrompt {
 		t.Fatalf("detail SessionPrompt = %q, want stored session prompt", detail.Config.SessionPrompt)
 	}
-	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, basePrompt, "hello from managed stream")
-	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, sessionPrompt, "hello from managed stream")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, basePrompt, "hello from managed stream")
+	assertTranscriptDoesNotIncludeProviderPrompt(t, detail.Messages, sessionPrompt, "hello from managed stream")
 }
 
 func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
@@ -658,20 +658,20 @@ func sessionPromptProviderContent(prompt string) string {
 	return "Session prompt:\n" + prompt
 }
 
-func assertProviderReceivedSystemPromptBeforeUser(t *testing.T, messages []capturedOpenAIChatMessage, systemPrompt string, userPrompt string) {
+func assertProviderReceivedSystemMessageBeforeUser(t *testing.T, messages []capturedOpenAIChatMessage, providerPrompt string, userPrompt string) {
 	t.Helper()
 	if len(messages) < 2 {
-		t.Fatalf("provider messages = %#v, want system prompt followed by user prompt", messages)
+		t.Fatalf("provider messages = %#v, want system message followed by user prompt", messages)
 	}
-	if messages[0].Role != "system" || messages[0].Content != systemPrompt {
-		t.Fatalf("first provider message = %#v, want system prompt %q", messages[0], systemPrompt)
+	if messages[0].Role != "system" || messages[0].Content != providerPrompt {
+		t.Fatalf("first provider message = %#v, want provider prompt %q", messages[0], providerPrompt)
 	}
 	if messages[1].Role != "user" || messages[1].Content != userPrompt {
 		t.Fatalf("second provider message = %#v, want user prompt %q", messages[1], userPrompt)
 	}
 }
 
-func assertTranscriptDoesNotIncludeSystemPrompt(t *testing.T, messages []appservice.SessionMessage, systemPrompt string, userPrompt string) {
+func assertTranscriptDoesNotIncludeProviderPrompt(t *testing.T, messages []appservice.SessionMessage, providerPrompt string, userPrompt string) {
 	t.Helper()
 	if len(messages) != 2 {
 		t.Fatalf("detail Messages len = %d, want user and assistant only: %#v", len(messages), messages)
@@ -683,8 +683,8 @@ func assertTranscriptDoesNotIncludeSystemPrompt(t *testing.T, messages []appserv
 		t.Fatalf("second transcript message = %#v, want assistant managed answer", messages[1])
 	}
 	for _, message := range messages {
-		if message.Role == "system" || strings.Contains(message.Content, systemPrompt) {
-			t.Fatalf("transcript leaks system prompt %q in %#v", systemPrompt, messages)
+		if message.Role == "system" || strings.Contains(message.Content, providerPrompt) {
+			t.Fatalf("transcript leaks provider prompt %q in %#v", providerPrompt, messages)
 		}
 	}
 }
