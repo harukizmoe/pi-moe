@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,7 @@ func SetNowForTest(t interface{ Cleanup(func()) }, now func() time.Time) {
 // Manager 管理本地 session index 和 session 文件路径。
 type Manager struct {
 	root string
+	mu   sync.Mutex
 }
 
 // SessionConfig 保存 managed session 的可恢复运行偏好；不包含密钥或完整 Provider 配置。
@@ -105,6 +107,8 @@ func (m *Manager) Create(ctx context.Context, title string, cfg SessionConfig) (
 	if err := ctx.Err(); err != nil {
 		return SessionMeta{}, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	index, err := m.loadIndex()
 	if err != nil {
 		return SessionMeta{}, err
@@ -180,6 +184,9 @@ func (m *Manager) Touch(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	index, err := m.loadIndex()
 	if err != nil {
 		return err
@@ -202,6 +209,9 @@ func (m *Manager) UpdateConfig(ctx context.Context, id string, cfg SessionConfig
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	index, err := m.loadIndex()
 	if err != nil {
 		return err
@@ -245,9 +255,28 @@ func (m *Manager) saveIndex(index sessionIndex) error {
 		return fmt.Errorf("encode session index: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(m.indexPath(), data, 0o600); err != nil {
-		return fmt.Errorf("write session index %q: %w", m.indexPath(), err)
+	tmp, err := os.CreateTemp(m.root, sessionIndexFileName+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create session index temp file: %w", err)
 	}
+	tmpPath := tmp.Name()
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write session index temp file %q: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close session index temp file %q: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, m.indexPath()); err != nil {
+		return fmt.Errorf("replace session index %q: %w", m.indexPath(), err)
+	}
+	removeTmp = false
 	return nil
 }
 
