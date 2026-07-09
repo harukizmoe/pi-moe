@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -66,6 +68,61 @@ func TestManagerCreateResolveListAndTouch(t *testing.T) {
 	}
 	if listed[0].UpdatedAt.Before(listed[1].UpdatedAt) {
 		t.Fatalf("List() not sorted by updated_at desc: %#v", listed)
+	}
+}
+func TestManagerConcurrentCreatesKeepAllEntries(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
+	const count = 256
+
+	start := make(chan struct{})
+	metas := make(chan SessionMeta, count)
+	errs := make(chan error, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			meta, err := manager.Create(context.Background(), fmt.Sprintf("prompt %03d", i), SessionConfig{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			metas <- meta
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(metas)
+
+	for err := range errs {
+		t.Fatalf("Create() concurrent error = %v", err)
+	}
+	created := make(map[string]struct{}, count)
+	for meta := range metas {
+		created[meta.ID] = struct{}{}
+	}
+	if len(created) != count {
+		t.Fatalf("created unique ids = %d, want %d", len(created), count)
+	}
+
+	listed, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(listed) != count {
+		t.Fatalf("List() len = %d, want %d", len(listed), count)
+	}
+	listedIDs := make(map[string]struct{}, len(listed))
+	for _, meta := range listed {
+		listedIDs[meta.ID] = struct{}{}
+	}
+	for id := range created {
+		if _, ok := listedIDs[id]; !ok {
+			t.Fatalf("List() missing created session %q", id)
+		}
 	}
 }
 

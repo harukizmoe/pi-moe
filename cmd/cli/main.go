@@ -147,6 +147,9 @@ func validateCLIOptions(opts cliOptions) error {
 	if opts.maxSteps < 0 {
 		return fmt.Errorf("--max-steps must not be negative")
 	}
+	if opts.interactive && len(opts.promptArgs) > 0 {
+		return fmt.Errorf("--interactive cannot be combined with prompt args")
+	}
 	if opts.listSessions {
 		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume || opts.maxSteps > 0 || strings.TrimSpace(opts.sessionPrompt) != "" {
 			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, --resume, --max-steps, or --session-prompt")
@@ -192,6 +195,9 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		cfg.ProviderName = createCfg.ProviderName
 		cfg.SessionPrompt = createCfg.SessionPrompt
 		cfg.MaxSteps = createCfg.MaxSteps
+		if _, err := session.New(ctx, cfg); err != nil {
+			return nil, nil, err
+		}
 		meta, err := manager.Create(ctx, title, createCfg)
 		if err != nil {
 			return nil, nil, err

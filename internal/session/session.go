@@ -15,7 +15,7 @@ type Config = agent.Config
 
 // Session 保存一次多 turn Agent 对话的内存态 transcript 和运行控制。
 type Session struct {
-	// mu 保护 messages、cancel 和 listeners；Agent Stream 在锁外执行，避免阻塞订阅者和取消路径。
+	// mu 保护 messages 和 cancel；Agent Stream 在锁外执行，避免阻塞取消路径。
 	mu sync.Mutex
 	// agent 是已装配好的执行器，Session 只负责喂 transcript 和消费 terminal events。
 	agent *agent.Agent
@@ -23,8 +23,6 @@ type Session struct {
 	messages []agent.Message
 	// cancel 指向当前运行中的 prompt；非 nil 表示禁止并发 turn。
 	cancel context.CancelFunc
-	// listeners 保存事件订阅者，写满的订阅者会被移除，避免慢消费者拖住主流程。
-	listeners map[chan Event]struct{}
 	// store 非 nil 时启用 JSONL 持久化；New 创建的纯内存 Session 保持原行为。
 	store *fileStore
 }
@@ -36,8 +34,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	return &Session{
-		agent:     runner,
-		listeners: make(map[chan Event]struct{}),
+		agent: runner,
 	}, nil
 }
 
@@ -56,10 +53,9 @@ func Open(ctx context.Context, cfg Config, path string) (*Session, error) {
 		return nil, err
 	}
 	return &Session{
-		agent:     runner,
-		messages:  messages,
-		listeners: make(map[chan Event]struct{}),
-		store:     store,
+		agent:    runner,
+		messages: messages,
+		store:    store,
 	}, nil
 }
 
@@ -95,15 +91,6 @@ func (s *Session) Prompt(ctx context.Context, input string) <-chan Event {
 	out := make(chan Event, 64)
 	go s.runPrompt(ctx, cancel, snapshot, baseLen, out)
 	return out
-}
-
-// Events 订阅 session 后续事件；订阅者必须持续读取以避免被移除。
-func (s *Session) Events() <-chan Event {
-	ch := make(chan Event, 64)
-	s.mu.Lock()
-	s.listeners[ch] = struct{}{}
-	s.mu.Unlock()
-	return ch
 }
 
 // Messages 返回当前 transcript 的防御性快照。
@@ -143,7 +130,6 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 		if runEnd, ok := event.(RunEndEvent); ok {
 			if err := s.persistMessagesFrom(baseLen); err != nil {
 				terminal := ErrorEvent{RunID: runEnd.RunID, Error: err}
-				s.publish(terminal)
 				emitSessionTerminal(out, terminal)
 				return
 			}
@@ -151,19 +137,16 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 		}
 		if _, ok := event.(ErrorEvent); ok && ctx.Err() != nil {
 			canceled = true
-			s.publish(event)
 			emitSessionTerminal(out, event)
 			return
 		}
 
 		// 只把 terminal 事件纳入 transcript；MessageDelta 等流式 UI 事件不参与恢复。
 		s.applyTerminalEvent(event)
-		s.publish(event)
 		if !emitSessionEvent(ctx, out, event) {
 			if err := ctx.Err(); err != nil && !completed {
 				canceled = true
 				terminal := ErrorEvent{Error: err}
-				s.publish(terminal)
 				emitSessionTerminal(out, terminal)
 			}
 			return
@@ -172,16 +155,11 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 	if err := ctx.Err(); err != nil && !completed {
 		canceled = true
 		terminal := ErrorEvent{Error: err}
-		s.publish(terminal)
 		emitSessionTerminal(out, terminal)
 		return
 	}
 	if !completed {
-		if err := s.persistMessagesFrom(baseLen); err != nil {
-			terminal := ErrorEvent{Error: err}
-			s.publish(terminal)
-			emitSessionTerminal(out, terminal)
-		}
+		s.discardMessagesFrom(baseLen)
 	}
 }
 
@@ -225,19 +203,6 @@ func (s *Session) persistMessagesFrom(index int) error {
 		return fmt.Errorf("persist session messages: %w", err)
 	}
 	return nil
-}
-
-func (s *Session) publish(event Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for listener := range s.listeners {
-		select {
-		case listener <- event:
-		default:
-			close(listener)
-			delete(s.listeners, listener)
-		}
-	}
 }
 
 func emitSessionEvent(ctx context.Context, stream chan<- Event, event Event) bool {

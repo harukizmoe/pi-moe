@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"harukizmoe/pimoe/internal/agent"
-	"harukizmoe/pimoe/internal/application/data"
 	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
@@ -17,8 +17,8 @@ import (
 
 // SessionConfig 保存创建 SessionService 所需的依赖和 Provider 配置。
 type SessionConfig struct {
-	// Store 是 session metadata 的数据层接口。
-	Store data.SessionStore
+	// SessionRoot 是 session.Manager 保存 index 和 transcript 的根目录；为空时使用默认目录。
+	SessionRoot string
 	// ProviderConfigPath 指向 providers YAML 配置文件。
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
@@ -33,13 +33,17 @@ type SessionConfig struct {
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	store      data.SessionStore
+	manager    *session.Manager
 	config     session.Config
 	basePrompt string
+
+	// sessionRunLocks 按 session ID 串行化会推进 transcript leaf 的 Run/Stream。
+	sessionRunLocksMu sync.Mutex
+	sessionRunLocks   map[string]chan struct{}
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
-type SessionMeta = data.SessionMeta
+type SessionMeta = session.SessionMeta
 
 // SessionDetail 描述一个 session 的 metadata 和已持久化 transcript。
 type SessionDetail struct {
@@ -181,14 +185,11 @@ type streamErrorData struct {
 
 // NewSessionService 创建 session 业务服务。
 func NewSessionService(cfg SessionConfig) (*SessionService, error) {
-	if cfg.Store == nil {
-		return nil, fmt.Errorf("session store must not be nil")
-	}
 	if strings.TrimSpace(cfg.ProviderConfigPath) == "" {
 		return nil, fmt.Errorf("provider config path must not be empty")
 	}
 	return &SessionService{
-		store: cfg.Store,
+		manager: session.NewManager(cfg.SessionRoot),
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
@@ -196,7 +197,8 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 			Logger:             cfg.Logger,
 			MaxSteps:           cfg.MaxSteps,
 		},
-		basePrompt: strings.TrimSpace(cfg.BaseSystemPrompt),
+		basePrompt:      strings.TrimSpace(cfg.BaseSystemPrompt),
+		sessionRunLocks: make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -295,6 +297,24 @@ func firstCreateOptions(opts []CreateOptions) CreateOptions {
 	return opts[0]
 }
 
+func (s *SessionService) lockSessionRun(ctx context.Context, sessionID string) (func(), error) {
+	s.sessionRunLocksMu.Lock()
+	lock := s.sessionRunLocks[sessionID]
+	if lock == nil {
+		lock = make(chan struct{}, 1)
+		lock <- struct{}{}
+		s.sessionRunLocks[sessionID] = lock
+	}
+	s.sessionRunLocksMu.Unlock()
+
+	select {
+	case <-lock:
+		return func() { lock <- struct{}{} }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
@@ -346,9 +366,9 @@ func (s *SessionService) persistRunSuccess(ctx context.Context, meta SessionMeta
 	if override {
 		cfg := meta.Config
 		cfg.ProviderName = providerName
-		return s.store.UpdateConfig(ctx, meta.ID, cfg)
+		return s.manager.UpdateConfig(ctx, meta.ID, cfg)
 	}
-	return s.store.Touch(ctx, meta.ID)
+	return s.manager.Touch(ctx, meta.ID)
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。
@@ -360,7 +380,7 @@ func (s *SessionService) Create(ctx context.Context, title string, opts ...Creat
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	return s.store.Create(ctx, title, cfg)
+	return s.manager.Create(ctx, title, cfg)
 }
 
 // List 返回可恢复 sessions。
@@ -368,7 +388,7 @@ func (s *SessionService) List(ctx context.Context) ([]SessionMeta, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
-	return s.store.List(ctx)
+	return s.manager.List(ctx)
 }
 
 // Get 返回 session metadata 和当前可恢复 transcript。
@@ -376,7 +396,7 @@ func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDeta
 	if s == nil {
 		return SessionDetail{}, fmt.Errorf("session service is nil")
 	}
-	meta, err := s.store.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, sessionID)
 	if err != nil {
 		return SessionDetail{}, err
 	}
@@ -399,7 +419,16 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.store.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, sessionID)
+	if err != nil {
+		return RunResult{}, err
+	}
+	unlock, err := s.lockSessionRun(ctx, meta.ID)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer unlock()
+	meta, err = s.manager.Resolve(ctx, meta.ID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -429,7 +458,20 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.store.Resolve(ctx, sessionID)
+	meta, err := s.manager.Resolve(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := s.lockSessionRun(ctx, meta.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	meta, err = s.manager.Resolve(ctx, meta.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +485,12 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	}
 
 	out := make(chan StreamEvent)
-	go s.forwardStreamEvents(ctx, meta, providerName, override, runner.Prompt(ctx, input), out)
+	streamUnlock := unlock
+	go func() {
+		defer streamUnlock()
+		s.forwardStreamEvents(ctx, meta, providerName, override, runner.Prompt(ctx, input), out)
+	}()
+	unlock = nil
 	return out, nil
 }
 

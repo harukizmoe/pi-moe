@@ -783,7 +783,7 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 		round++
 		switch round {
 		case 1:
-			call := calculatorToolCall("call_bad_args", `{"a":1`)
+			call := calculatorToolCall("call_divide_by_zero", `{"a":1,"b":0,"op":"div"}`)
 			return streamEvents(
 				assistantToolCallDelta(0, call),
 				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
@@ -793,18 +793,15 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 			if got.Role != llms.RoleTool {
 				t.Fatalf("second request last role = %q, want tool", got.Role)
 			}
-			if got.ToolCallID != "call_bad_args" {
-				t.Fatalf("second request ToolCallID = %q, want call_bad_args", got.ToolCallID)
+			if got.ToolCallID != "call_divide_by_zero" {
+				t.Fatalf("second request ToolCallID = %q, want call_divide_by_zero", got.ToolCallID)
 			}
-			if !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
-				t.Fatalf("second request tool content = %q, want sanitized failure summary", got.Content)
-			}
-			if !strings.Contains(got.Content, "decode calculator arguments") {
-				t.Fatalf("second request tool content = %q, want calculator decode context", got.Content)
+			if got.Content != `tool "calculator" failed` {
+				t.Fatalf("second request tool content = %q, want safe failure summary", got.Content)
 			}
 			return streamEvents(
-				assistantTextDelta("I couldn't use calculator because the arguments were malformed."),
-				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "I couldn't use calculator because the arguments were malformed."}),
+				assistantTextDelta("I couldn't use calculator because the tool failed."),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "I couldn't use calculator because the tool failed."}),
 			), nil
 		default:
 			t.Fatalf("unexpected chat round = %d", round)
@@ -814,7 +811,7 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 
 	a := New(provider, registry, "fake-tool-model")
 	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{
-		UserMessage{Content: "try calculator with bad arguments"},
+		UserMessage{Content: "try calculator with divide by zero"},
 	}))
 
 	assertEventTypes(t, events,
@@ -836,24 +833,24 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 	}
 
 	toolEnd := events[6].(ToolExecutionEndEvent)
-	if toolEnd.Result.ToolCallID != "call_bad_args" {
-		t.Fatalf("tool result call id = %q, want call_bad_args", toolEnd.Result.ToolCallID)
+	if toolEnd.Result.ToolCallID != "call_divide_by_zero" {
+		t.Fatalf("tool result call id = %q, want call_divide_by_zero", toolEnd.Result.ToolCallID)
 	}
 	if toolEnd.Result.ToolName != "calculator" {
 		t.Fatalf("tool result name = %q, want calculator", toolEnd.Result.ToolName)
 	}
-	if !strings.HasPrefix(toolEnd.Result.Content, `tool "calculator" failed: `) {
-		t.Fatalf("tool result content = %q, want sanitized failure summary", toolEnd.Result.Content)
+	if toolEnd.Result.Content != `tool "calculator" failed` {
+		t.Fatalf("tool result content = %q, want safe failure summary", toolEnd.Result.Content)
 	}
 	if !toolEnd.Result.IsError {
 		t.Fatal("tool result IsError = false, want true")
 	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "decode calculator arguments") {
-		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
+	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "divide by zero") {
+		t.Fatalf("tool end error = %v, want calculator divide-by-zero failure", toolEnd.Error)
 	}
 
 	final := events[9].(MessageEndEvent).Message
-	if final.Content != "I couldn't use calculator because the arguments were malformed." {
+	if final.Content != "I couldn't use calculator because the tool failed." {
 		t.Fatalf("final assistant content = %q", final.Content)
 	}
 	if len(final.ToolCalls) != 0 {
@@ -870,17 +867,17 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 		round++
 		switch round {
 		case 1:
-			call := calculatorToolCall("call_bad_args", `{"a":1`)
+			call := calculatorToolCall("call_divide_by_zero", `{"a":1,"b":0,"op":"div"}`)
 			return streamEvents(
 				assistantToolCallDelta(0, call),
 				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
 			), nil
 		case 2:
 			got := req.Messages[len(req.Messages)-1]
-			if got.Role != llms.RoleTool || !strings.HasPrefix(got.Content, `tool "calculator" failed: `) {
-				t.Fatalf("second request last message = %#v, want sanitized tool failure", got)
+			if got.Role != llms.RoleTool || got.Content != `tool "calculator" failed` {
+				t.Fatalf("second request last message = %#v, want safe tool failure", got)
 			}
-			call := calculatorToolCall("call_retry", `{"a":1`)
+			call := calculatorToolCall("call_retry", `{"a":1,"b":0,"op":"div"}`)
 			return streamEvents(
 				assistantToolCallDelta(0, call),
 				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{call}}),
@@ -916,8 +913,8 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 	if !toolEnd.Result.IsError {
 		t.Fatal("tool result IsError = false, want true")
 	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "decode calculator arguments") {
-		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
+	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "divide by zero") {
+		t.Fatalf("tool end error = %v, want calculator divide-by-zero failure", toolEnd.Error)
 	}
 
 	errEvent := events[9].(ErrorEvent)

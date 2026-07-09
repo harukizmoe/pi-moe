@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 
-	appdata "harukizmoe/pimoe/internal/application/data"
 	approuter "harukizmoe/pimoe/internal/application/router"
 	appservice "harukizmoe/pimoe/internal/application/service"
 	"harukizmoe/pimoe/internal/logger"
@@ -45,7 +44,7 @@ func main() {
 		}
 	}()
 	sessionService, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              appdata.NewManagerSessionStore(opts.sessionRoot),
+		SessionRoot:        opts.sessionRoot,
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		Logger:             appLogger,

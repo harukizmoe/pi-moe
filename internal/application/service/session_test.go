@@ -10,19 +10,19 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	appdata "harukizmoe/pimoe/internal/application/data"
 	appservice "harukizmoe/pimoe/internal/application/service"
 	"harukizmoe/pimoe/internal/session"
 )
 
-func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
+func TestSessionServiceCreateListAndRunUsesSessionManager(t *testing.T) {
 	ctx := context.Background()
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
-	store := appdata.NewManagerSessionStore(sessionRoot)
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -70,9 +70,9 @@ func TestSessionServiceCreateListAndRunUsesStoreBoundary(t *testing.T) {
 
 func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 		MaxSteps:           3,
@@ -97,9 +97,9 @@ func TestSessionServiceRunCombinesBaseAndSessionPromptsForProviderRequestWithout
 	server, requests := newCapturingOpenAICompatibleServer(t)
 	defer server.Close()
 
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
 		ProviderName:       "test-openai",
 		BaseSystemPrompt:   basePrompt,
@@ -143,9 +143,9 @@ func TestSessionServiceRunAppliesConfiguredBaseSystemPromptWithoutPersistingIt(t
 	server, requests := newCapturingOpenAICompatibleServer(t)
 	defer server.Close()
 
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
 		ProviderName:       "test-openai",
 		BaseSystemPrompt:   basePrompt,
@@ -184,9 +184,9 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 	server, requests := newCapturingOpenAICompatibleServer(t)
 	defer server.Close()
 
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
 		ProviderName:       "test-openai",
 		BaseSystemPrompt:   basePrompt,
@@ -225,7 +225,7 @@ func TestSessionServiceStreamCombinesBaseAndSessionPromptsForProviderRequestWith
 
 func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	configPath := writeProvidersConfigContent(t, `llms:
   default_provider: fake-local
   providers:
@@ -234,9 +234,11 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
       model: fake-tool-model
     fake-alt:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: broken-default-model
 `)
-	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath})
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{SessionRoot: sessionRoot, ProviderConfigPath: configPath})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
@@ -257,6 +259,8 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
       model: fake-tool-model
     fake-alt:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: broken-default-model
 `), 0o600); err != nil {
 		t.Fatalf("rewrite providers config: %v", err)
@@ -272,18 +276,20 @@ func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 
 func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	configPath := writeProvidersConfigContent(t, `llms:
   default_provider: missing-default
   providers:
     fake-old:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: bad
     fake-new:
       type: fake
       model: fake-tool-model
 `)
-	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{SessionRoot: sessionRoot, ProviderConfigPath: configPath, ProviderName: "fake-old"})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
@@ -299,7 +305,7 @@ func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(
 	if result.Answer != "13 * 7 = 91" {
 		t.Fatalf("Run() Answer = %q, want calculator answer", result.Answer)
 	}
-	resolved, err := store.Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -310,18 +316,20 @@ func TestSessionServiceRunAllowsExplicitProviderOverrideAndPersistsAfterSuccess(
 
 func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSuccess(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	configPath := writeProvidersConfigContent(t, `llms:
   default_provider: missing-default
   providers:
     fake-old:
       type: openai_compatible
+      base_url: "https://example.invalid/v1"
+      api_key_env: TEST_PROVIDER_KEY
       model: bad
     fake-new:
       type: fake
       model: fake-tool-model
 `)
-	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{SessionRoot: sessionRoot, ProviderConfigPath: configPath, ProviderName: "fake-old"})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
@@ -336,7 +344,7 @@ func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSucce
 	}
 	got := collectStreamEvents(t, events)
 	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "13 * 7 = 91"})
-	resolved, err := store.Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -347,7 +355,7 @@ func TestSessionServiceStreamAllowsExplicitProviderOverrideAndPersistsAfterSucce
 
 func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFailure(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	configPath := writeProvidersConfigContent(t, `llms:
   default_provider: fake-old
   providers:
@@ -355,7 +363,7 @@ func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFai
       type: fake
       model: fake-tool-model
 `)
-	svc, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "fake-old"})
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{SessionRoot: sessionRoot, ProviderConfigPath: configPath, ProviderName: "fake-old"})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
@@ -368,7 +376,7 @@ func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFai
 	if err == nil || !strings.Contains(err.Error(), `unknown provider "missing-provider"`) {
 		t.Fatalf("Run() error = %v, want unknown provider error", err)
 	}
-	resolved, err := store.Resolve(ctx, created.ID)
+	resolved, err := session.NewManager(sessionRoot).Resolve(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -379,7 +387,7 @@ func TestSessionServiceRunDoesNotPersistExplicitProviderOverrideAfterOverrideFai
 
 func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	configPath := writeProvidersConfigContent(t, `llms:
   default_provider: fake-new
   providers:
@@ -387,7 +395,7 @@ func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testi
       type: fake
       model: fake-tool-model
 `)
-	creator, err := appservice.NewSessionService(appservice.SessionConfig{Store: store, ProviderConfigPath: configPath, ProviderName: "missing-provider"})
+	creator, err := appservice.NewSessionService(appservice.SessionConfig{SessionRoot: sessionRoot, ProviderConfigPath: configPath, ProviderName: "missing-provider"})
 	if err != nil {
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
@@ -404,9 +412,9 @@ func TestSessionServiceRunMissingStoredProviderRequiresExplicitOverride(t *testi
 
 func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -438,11 +446,163 @@ func TestSessionServiceRunResumesExistingTranscriptForNextPrompt(t *testing.T) {
 	assertServiceResumedTranscript(t, detail.Messages)
 }
 
+func TestSessionServiceConcurrentRunOnSameSessionKeepsBothTurns(t *testing.T) {
+	ctx := context.Background()
+	server, arrivals, releaseRuns := newBlockingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		SessionRoot:        sessionRoot,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "concurrent run")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	results := make(chan runOutcome, 2)
+	runPrompt := func(prompt string) {
+		result, err := svc.Run(ctx, created.ID, prompt)
+		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
+	}
+
+	go runPrompt("first concurrent prompt")
+	if got := receivePromptArrival(t, arrivals); got != "first concurrent prompt" {
+		t.Fatalf("first provider prompt = %q, want first concurrent prompt", got)
+	}
+
+	go runPrompt("second concurrent prompt")
+	secondArrivedBeforeRelease := false
+	select {
+	case got := <-arrivals:
+		secondArrivedBeforeRelease = true
+		if got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+	}
+	releaseRuns()
+	if !secondArrivedBeforeRelease {
+		if got := receivePromptArrival(t, arrivals); got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	}
+
+	wantAnswers := map[string]string{
+		"first concurrent prompt":  "first concurrent answer",
+		"second concurrent prompt": "second concurrent answer",
+	}
+	for range wantAnswers {
+		select {
+		case outcome := <-results:
+			if outcome.err != nil {
+				t.Fatalf("Run(%q) error = %v", outcome.prompt, outcome.err)
+			}
+			if outcome.answer != wantAnswers[outcome.prompt] {
+				t.Fatalf("Run(%q) Answer = %q, want %q", outcome.prompt, outcome.answer, wantAnswers[outcome.prompt])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Run results")
+		}
+	}
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if len(detail.Messages) != 4 {
+		t.Fatalf("Get() Messages len = %d, want both user/assistant turns: %#v", len(detail.Messages), detail.Messages)
+	}
+	gotTurns := map[string]string{}
+	for i := 0; i < len(detail.Messages); i += 2 {
+		user := detail.Messages[i]
+		assistant := detail.Messages[i+1]
+		if user.Role != "user" || assistant.Role != "assistant" {
+			t.Fatalf("messages[%d:%d] = %#v, %#v; want user then assistant", i, i+2, user, assistant)
+		}
+		gotTurns[user.Content] = assistant.Content
+	}
+	for prompt, answer := range wantAnswers {
+		if gotTurns[prompt] != answer {
+			t.Fatalf("persisted turn for %q = %q, want %q in %#v", prompt, gotTurns[prompt], answer, detail.Messages)
+		}
+	}
+}
+
+func TestSessionServiceConcurrentRunOnDifferentSessionsDoesNotBlock(t *testing.T) {
+	ctx := context.Background()
+	server, arrivals, releaseRuns := newBlockingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		SessionRoot:        sessionRoot,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	firstSession, err := svc.Create(ctx, "first concurrent run")
+	if err != nil {
+		t.Fatalf("first Create() error = %v", err)
+	}
+	secondSession, err := svc.Create(ctx, "second concurrent run")
+	if err != nil {
+		t.Fatalf("second Create() error = %v", err)
+	}
+
+	results := make(chan runOutcome, 2)
+	runPrompt := func(sessionID string, prompt string) {
+		result, err := svc.Run(ctx, sessionID, prompt)
+		results <- runOutcome{prompt: prompt, answer: result.Answer, err: err}
+	}
+
+	go runPrompt(firstSession.ID, "first concurrent prompt")
+	if got := receivePromptArrival(t, arrivals); got != "first concurrent prompt" {
+		t.Fatalf("first provider prompt = %q, want first concurrent prompt", got)
+	}
+
+	go runPrompt(secondSession.ID, "second concurrent prompt")
+	select {
+	case got := <-arrivals:
+		if got != "second concurrent prompt" {
+			t.Fatalf("second provider prompt = %q, want second concurrent prompt", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("different session run blocked behind active session")
+	}
+	releaseRuns()
+
+	wantAnswers := map[string]string{
+		"first concurrent prompt":  "first concurrent answer",
+		"second concurrent prompt": "second concurrent answer",
+	}
+	for range wantAnswers {
+		select {
+		case outcome := <-results:
+			if outcome.err != nil {
+				t.Fatalf("Run(%q) error = %v", outcome.prompt, outcome.err)
+			}
+			if outcome.answer != wantAnswers[outcome.prompt] {
+				t.Fatalf("Run(%q) Answer = %q, want %q", outcome.prompt, outcome.answer, wantAnswers[outcome.prompt])
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent Run results")
+		}
+	}
+}
+
 func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
 	ctx := context.Background()
-	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -504,10 +664,9 @@ func TestSessionServiceGetReturnsMetadataAndTerminalMessages(t *testing.T) {
 func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "sessions")
-	store := appdata.NewManagerSessionStore(root)
 	workingConfig := writeProvidersConfig(t)
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        root,
 		ProviderConfigPath: workingConfig,
 		ProviderName:       "fake-local",
 	})
@@ -530,7 +689,7 @@ func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testin
       model: gpt-test
 `)
 	readOnlySvc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        root,
 		ProviderConfigPath: brokenConfig,
 		ProviderName:       "broken",
 	})
@@ -550,8 +709,8 @@ func TestSessionServiceGetDoesNotRequireProviderConfigToLoadTranscript(t *testin
 func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "sessions")
-	store := appdata.NewManagerSessionStore(root)
-	created, err := store.Create(ctx, "malformed tool args", session.SessionConfig{})
+	manager := session.NewManager(root)
+	created, err := manager.Create(ctx, "malformed tool args", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -561,7 +720,7 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 		`{"id":"leaf","parent_id":"m2","type":"leaf","timestamp":"2026-07-08T00:00:02Z","leaf":{"entry_id":"m2"}}`,
 	})
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        root,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -591,6 +750,65 @@ type capturedOpenAIChatMessage struct {
 	Content string `json:"content,omitempty"`
 }
 
+type runOutcome struct {
+	prompt string
+	answer string
+	err    error
+}
+
+func newBlockingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan string, func()) {
+	t.Helper()
+	arrivals := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRuns := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(releaseRuns)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var captured capturedOpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode OpenAI-compatible request: %v", err)
+		}
+		prompt := lastUserPrompt(captured.Messages)
+		arrivals <- prompt
+		<-release
+		answer := strings.Replace(prompt, " prompt", " answer", 1)
+		writeServiceOpenAISSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, answer),
+			`{"choices":[{"finish_reason":"stop"}]}`,
+		)
+	}))
+	return server, arrivals, releaseRuns
+}
+
+func lastUserPrompt(messages []capturedOpenAIChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
+func receivePromptArrival(t *testing.T, arrivals <-chan string) string {
+	t.Helper()
+	select {
+	case prompt := <-arrivals:
+		return prompt
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for provider request")
+		return ""
+	}
+}
 func newCapturingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan capturedOpenAIChatRequest) {
 	t.Helper()
 	requests := make(chan capturedOpenAIChatRequest, 1)
@@ -623,6 +841,7 @@ func writeOpenAICompatibleProvidersConfig(t *testing.T, baseURL string) string {
     test-openai:
       type: openai_compatible
       base_url: %q
+      api_key_env: TEST_PROVIDER_KEY
       model: test-model
       timeout_seconds: 1
 `, baseURL))
@@ -720,9 +939,8 @@ func writeSessionJSONL(t *testing.T, path string, lines []string) {
 func TestSessionServiceStreamReturnsStableApplicationEvents(t *testing.T) {
 	ctx := context.Background()
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
-	store := appdata.NewManagerSessionStore(sessionRoot)
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              store,
+		SessionRoot:        sessionRoot,
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -758,7 +976,7 @@ func TestSessionServiceStreamReturnsStableApplicationEvents(t *testing.T) {
 func TestSessionServiceCurrentProviderDiagnosticsReportsFakeProviderReady(t *testing.T) {
 	ctx := context.Background()
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		SessionRoot:        filepath.Join(t.TempDir(), "sessions"),
 		ProviderConfigPath: writeProvidersConfig(t),
 		ProviderName:       "fake-local",
 	})
@@ -786,7 +1004,7 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingAPIKeyEnvWithoutS
 	ctx := context.Background()
 	unsetEnvForTest(t, "TEST_PROVIDER_KEY")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store: appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		SessionRoot: filepath.Join(t.TempDir(), "sessions"),
 		ProviderConfigPath: writeProvidersConfigContent(t, `llms:
   default_provider: test-openai
   providers:
@@ -825,11 +1043,11 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingAPIKeyEnvWithoutS
 	}
 }
 
-func TestSessionServiceCurrentProviderDiagnosticsReportsMissingBaseURL(t *testing.T) {
+func TestSessionServiceCurrentProviderDiagnosticsReturnsConfigErrorForMissingBaseURL(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("TEST_PROVIDER_KEY", "test-secret-value")
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store: appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		SessionRoot: filepath.Join(t.TempDir(), "sessions"),
 		ProviderConfigPath: writeProvidersConfigContent(t, `llms:
   default_provider: test-openai
   providers:
@@ -844,26 +1062,16 @@ func TestSessionServiceCurrentProviderDiagnosticsReportsMissingBaseURL(t *testin
 		t.Fatalf("NewSessionService() error = %v", err)
 	}
 
-	got, err := svc.CurrentProviderDiagnostics(ctx)
-	if err != nil {
-		t.Fatalf("CurrentProviderDiagnostics() error = %v", err)
-	}
-	want := appservice.ProviderDiagnostics{
-		Name:  "test-openai",
-		Type:  "openai_compatible",
-		Model: "gpt-test",
-		Ready: false,
-		Error: "openai-compatible base_url is required",
-	}
-	if got != want {
-		t.Fatalf("CurrentProviderDiagnostics() = %#v, want %#v", got, want)
+	_, err = svc.CurrentProviderDiagnostics(ctx)
+	if err == nil || !strings.Contains(err.Error(), `provider "test-openai" openai_compatible base_url is required`) {
+		t.Fatalf("CurrentProviderDiagnostics() error = %v, want missing base_url config error", err)
 	}
 }
 
 func TestSessionServiceCurrentProviderDiagnosticsReportsUnknownProviderType(t *testing.T) {
 	ctx := context.Background()
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store: appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		SessionRoot: filepath.Join(t.TempDir(), "sessions"),
 		ProviderConfigPath: writeProvidersConfigContent(t, `llms:
   default_provider: mystery
   providers:

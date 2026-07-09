@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	appdata "harukizmoe/pimoe/internal/application/data"
 	approuter "harukizmoe/pimoe/internal/application/router"
 	appservice "harukizmoe/pimoe/internal/application/service"
 )
@@ -122,7 +121,7 @@ func newTestHTTPHandler(t *testing.T) http.Handler {
 	t.Helper()
 
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		SessionRoot:        filepath.Join(t.TempDir(), "sessions"),
 		ProviderConfigPath: writeHTTPProvidersConfig(t),
 		ProviderName:       "fake",
 	})

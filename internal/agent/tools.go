@@ -14,7 +14,7 @@ func (a *Agent) runToolCall(ctx context.Context, call llms.ToolCall) (ToolResult
 		return ToolResultMessage{
 			ToolCallID: call.ID,
 			ToolName:   call.Function.Name,
-			Content:    safeToolErrorContent(call.Function.Name, err),
+			Content:    safeToolErrorContent(call.Function.Name),
 			IsError:    true,
 		}, fmt.Errorf("call tool %q: %w", call.Function.Name, err)
 	}
@@ -26,6 +26,6 @@ func (a *Agent) runToolCall(ctx context.Context, call llms.ToolCall) (ToolResult
 	}, nil
 }
 
-func safeToolErrorContent(toolName string, err error) string {
-	return fmt.Sprintf("tool %q failed: %v", toolName, err)
+func safeToolErrorContent(toolName string) string {
+	return fmt.Sprintf("tool %q failed", toolName)
 }

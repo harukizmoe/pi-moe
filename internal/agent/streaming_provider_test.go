@@ -317,28 +317,21 @@ func TestAgentStreamMaxStepsOverLimitDoesNotEmitMessageEndEvent(t *testing.T) {
 	}
 }
 
-func TestAgentStreamPreservesWhitespaceOnlyStreamingToolCallDelta(t *testing.T) {
+func TestAgentStreamPreservesWhitespaceToolCallDeltaAndRejectsBlankArguments(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 
 	blankArgsCall := calculatorToolCall("call_blank_args", " ")
 	provider := &streamingProviderStub{}
 	provider.streamFunc = func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
-		switch provider.streamCalls {
-		case 1:
-			return streamEvents(
-				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCallDelta{{Index: 0, ID: blankArgsCall.ID, Type: blankArgsCall.Type, Function: llms.ToolCallFunctionDelta{Name: blankArgsCall.Function.Name, Arguments: " "}}}}},
-				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{blankArgsCall}}},
-			), nil
-		case 2:
-			return streamEvents(
-				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, Content: "tool arguments were blank"}},
-				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: llms.Message{Role: llms.RoleAssistant, Content: "tool arguments were blank"}},
-			), nil
-		default:
+		if provider.streamCalls != 1 {
 			t.Fatalf("unexpected ChatStream round = %d", provider.streamCalls)
 			return nil, nil
 		}
+		return streamEvents(
+			llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCallDelta{{Index: 0, ID: blankArgsCall.ID, Type: blankArgsCall.Type, Function: llms.ToolCallFunctionDelta{Name: blankArgsCall.Function.Name, Arguments: " "}}}}},
+			llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{blankArgsCall}}},
+		), nil
 	}
 
 	a := New(provider, registry, "fake-tool-model")
@@ -349,14 +342,7 @@ func TestAgentStreamPreservesWhitespaceOnlyStreamingToolCallDelta(t *testing.T) 
 		TurnStartEvent{},
 		MessageStartEvent{},
 		MessageDeltaEvent{},
-		MessageEndEvent{},
-		ToolExecutionStartEvent{},
-		ToolExecutionEndEvent{},
-		MessageStartEvent{},
-		MessageDeltaEvent{},
-		MessageEndEvent{},
-		TurnEndEvent{},
-		RunEndEvent{},
+		ErrorEvent{},
 	)
 
 	toolDelta := events[3].(MessageDeltaEvent)
@@ -367,30 +353,11 @@ func TestAgentStreamPreservesWhitespaceOnlyStreamingToolCallDelta(t *testing.T) 
 		t.Fatalf("tool delta = %q, want single-space arguments", toolDelta.Delta)
 	}
 
-	toolStart := events[5].(ToolExecutionStartEvent)
-	if toolStart.Arguments != " " {
-		t.Fatalf("tool start arguments = %q, want single-space arguments", toolStart.Arguments)
+	errEvent := events[4].(ErrorEvent)
+	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "tool call arguments") {
+		t.Fatalf("stream error = %v, want tool call argument validation", errEvent.Error)
 	}
-
-	toolEnd := events[6].(ToolExecutionEndEvent)
-	if !toolEnd.Result.IsError {
-		t.Fatal("tool result IsError = false, want true for blank calculator arguments")
-	}
-	if toolEnd.Result.ToolCallID != blankArgsCall.ID {
-		t.Fatalf("tool result call id = %q, want %q", toolEnd.Result.ToolCallID, blankArgsCall.ID)
-	}
-	if !strings.HasPrefix(toolEnd.Result.Content, `tool "calculator" failed: `) {
-		t.Fatalf("tool result content = %q, want sanitized calculator failure", toolEnd.Result.Content)
-	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "decode calculator arguments") {
-		t.Fatalf("tool end error = %v, want calculator decode failure", toolEnd.Error)
-	}
-
-	secondRequestToolResult := provider.requests[1].Messages[2]
-	if secondRequestToolResult.Role != llms.RoleTool || secondRequestToolResult.ToolCallID != blankArgsCall.ID {
-		t.Fatalf("second request tool result = %#v", secondRequestToolResult)
-	}
-	if !strings.Contains(secondRequestToolResult.Content, "decode calculator arguments") {
-		t.Fatalf("second request tool content = %q, want calculator decode context", secondRequestToolResult.Content)
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests len = %d, want one failed validation round", len(provider.requests))
 	}
 }

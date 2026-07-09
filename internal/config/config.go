@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/viper"
 
@@ -27,8 +28,11 @@ func Load(path string) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
+	if err := v.UnmarshalExact(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config %q: %w", path, err)
+	}
+	if err := validateProviderConfig(cfg); err != nil {
+		return nil, fmt.Errorf("validate config %q: %w", path, err)
 	}
 
 	// API Key 不写入 YAML；每个 Provider 只声明需要读取的环境变量名。
@@ -40,4 +44,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func validateProviderConfig(cfg Config) error {
+	for name, provider := range cfg.LLMs.Providers {
+		if provider.Type != "openai_compatible" {
+			continue
+		}
+		if strings.TrimSpace(provider.BaseURL) == "" {
+			return fmt.Errorf("provider %q openai_compatible base_url is required", name)
+		}
+		if strings.TrimSpace(provider.Model) == "" {
+			return fmt.Errorf("provider %q openai_compatible model is required", name)
+		}
+		if strings.TrimSpace(provider.APIKeyEnv) == "" {
+			return fmt.Errorf("provider %q openai_compatible api_key_env is required", name)
+		}
+	}
+	return nil
 }
