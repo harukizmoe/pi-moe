@@ -399,7 +399,7 @@ func TestNewCLISessionStoresProviderPreference(t *testing.T) {
 	if runner == nil || managed == nil {
 		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
 	}
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -468,7 +468,7 @@ func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
 	if runner == nil || managed == nil {
 		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
 	}
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -518,7 +518,7 @@ func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "fake-local"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -550,7 +550,7 @@ func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *te
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "missing"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "missing"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -565,7 +565,7 @@ func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *te
 	if err := touchManagedSession(ctx, managed); err != nil {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
-	resolved, err := manager.Resolve(ctx, created.ID)
+	resolved, err := manager.Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -585,7 +585,7 @@ func TestResumeCLISessionReportsMissingStoredProviderWithOverrideGuidance(t *tes
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "removed-provider"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "removed-provider"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -663,7 +663,7 @@ func TestNewCLISessionPersistsManagedPreferenceFlags(t *testing.T) {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
 
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -745,7 +745,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -773,7 +773,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 	if err := touchManagedSession(ctx, managed); err != nil {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
-	resolved, err := manager.Resolve(ctx, created.ID)
+	resolved, err := manager.Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -816,7 +816,7 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 		t.Fatalf("first touch error = %v", err)
 	}
 	manager := session.NewManager(root)
-	before, err := manager.Resolve(ctx, managed.ID)
+	before, err := manager.Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() before error = %v", err)
 	}
@@ -843,7 +843,7 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	if err := touchManagedSession(ctx, resumed); err != nil {
 		t.Fatalf("second touch error = %v", err)
 	}
-	after, err := manager.Resolve(ctx, managed.ID)
+	after, err := manager.Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() after error = %v", err)
 	}
@@ -886,16 +886,16 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)
-	first, err := manager.Create(context.Background(), "first prompt", session.SessionConfig{})
+	first, err := manager.Create(context.Background(), session.LocalActor(), "first prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
-	second, err := manager.Create(context.Background(), "second prompt", session.SessionConfig{})
+	second, err := manager.Create(context.Background(), session.LocalActor(), "second prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}
 	time.Sleep(time.Millisecond)
-	if err := manager.Touch(context.Background(), first.ID); err != nil {
+	if err := manager.Touch(context.Background(), session.LocalActor(), first.ID); err != nil {
 		t.Fatalf("Touch() first error = %v", err)
 	}
 

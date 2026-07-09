@@ -187,6 +187,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 	}
 
 	manager := session.NewManager(sessionRoot)
+	actor := session.LocalActor()
 	if opts.newSession {
 		createCfg, err := newCLIManagedSessionConfig(opts)
 		if err != nil {
@@ -198,7 +199,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if _, err := session.New(ctx, cfg); err != nil {
 			return nil, nil, err
 		}
-		meta, err := manager.Create(ctx, title, createCfg)
+		meta, err := manager.Create(ctx, actor, title, createCfg)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -210,7 +211,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 	}
 
 	if strings.TrimSpace(opts.resumeSessionID) != "" {
-		meta, err := manager.Resolve(ctx, opts.resumeSessionID)
+		meta, err := manager.Resolve(ctx, actor, opts.resumeSessionID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -277,10 +278,11 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 	if managed == nil {
 		return nil
 	}
+	actor := session.LocalActor()
 	providerOverride := strings.TrimSpace(managed.providerOverride)
 	sessionPromptOverride := strings.TrimSpace(managed.sessionPromptOverride)
 	if providerOverride != "" || managed.maxStepsOverride > 0 || sessionPromptOverride != "" {
-		meta, err := managed.manager.Resolve(ctx, managed.ID)
+		meta, err := managed.manager.Resolve(ctx, actor, managed.ID)
 		if err != nil {
 			return err
 		}
@@ -294,9 +296,9 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 		if sessionPromptOverride != "" {
 			cfg.SessionPrompt = sessionPromptOverride
 		}
-		return managed.manager.UpdateConfig(ctx, managed.ID, cfg)
+		return managed.manager.UpdateConfig(ctx, actor, managed.ID, cfg)
 	}
-	return managed.manager.Touch(ctx, managed.ID)
+	return managed.manager.Touch(ctx, actor, managed.ID)
 }
 
 func readInput(args []string, stdin io.Reader) (string, error) {
@@ -404,7 +406,7 @@ func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 }
 
 func runListSessions(ctx context.Context, output io.Writer, root string) error {
-	metas, err := session.NewManager(root).List(ctx)
+	metas, err := session.NewManager(root).List(ctx, session.LocalActor())
 	if err != nil {
 		return err
 	}
