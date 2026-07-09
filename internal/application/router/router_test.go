@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	appdata "harukizmoe/pimoe/internal/application/data"
 	approuter "harukizmoe/pimoe/internal/application/router"
 	appservice "harukizmoe/pimoe/internal/application/service"
 )
@@ -497,7 +496,7 @@ func newTestRouterWithConfig(t *testing.T, cfg testRouterConfig) http.Handler {
 		cfg.providerName = "fake"
 	}
 	svc, err := appservice.NewSessionService(appservice.SessionConfig{
-		Store:              appdata.NewManagerSessionStore(cfg.root),
+		SessionRoot:        cfg.root,
 		ProviderConfigPath: cfg.providerConfigPath,
 		ProviderName:       cfg.providerName,
 		BaseSystemPrompt:   cfg.basePrompt,
