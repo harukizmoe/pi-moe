@@ -145,6 +145,10 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				continue
 			}
 			if payload == "[DONE]" {
+				if err := validateOpenAIStreamToolCalls(toolCalls); err != nil {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: err}
+					return
+				}
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
 				return
 			}
@@ -187,6 +191,10 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDelta, Delta: delta}
 			}
 			if choice.FinishReason != "" {
+				if err := validateOpenAIStreamToolCalls(toolCalls); err != nil {
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: err}
+					return
+				}
 				events <- ChatStreamEvent{Type: ChatStreamEventTypeDone, Message: openAIStreamMessage(role, content.String(), toolCalls)}
 				return
 			}
@@ -323,6 +331,25 @@ func mergeOpenAIStreamToolCalls(toolCalls []openAIToolCall, deltas []openAIChatT
 	}
 
 	return toolCalls, nil
+}
+
+func validateOpenAIStreamToolCalls(toolCalls []openAIToolCall) error {
+	for i, toolCall := range toolCalls {
+		if strings.TrimSpace(toolCall.ID) == "" {
+			return fmt.Errorf("openai-compatible tool call missing id at index %d", i)
+		}
+		if strings.TrimSpace(toolCall.Function.Name) == "" {
+			return fmt.Errorf("openai-compatible tool call missing function name at index %d", i)
+		}
+		arguments := strings.TrimSpace(toolCall.Function.Arguments)
+		if arguments == "" {
+			continue
+		}
+		if !json.Valid([]byte(arguments)) {
+			return fmt.Errorf("openai-compatible tool call arguments are not valid JSON at index %d", i)
+		}
+	}
+	return nil
 }
 
 func openAIStreamMessage(role Role, content string, toolCalls []openAIToolCall) Message {

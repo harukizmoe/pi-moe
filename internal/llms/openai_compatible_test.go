@@ -666,6 +666,79 @@ func TestOpenAICompatibleProviderChatStreamAggregatesToolCallChunks(t *testing.T
 	}
 }
 
+func TestOpenAICompatibleProviderChatStreamRejectsInvalidFinalToolCalls(t *testing.T) {
+	tests := []struct {
+		name        string
+		payloads    []string
+		wantMessage string
+	}{
+		{
+			name: "invalid_arguments_json",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","function":{"name":"calculator","arguments":"{bad json"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call arguments are not valid JSON",
+		},
+		{
+			name: "missing_id",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"calculator","arguments":"{\"a\":13}"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call missing id",
+		},
+		{
+			name: "missing_name",
+			payloads: []string{
+				`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_missing_name","function":{"arguments":"{\"a\":13}"}}]}}]}`,
+				`{"choices":[{"finish_reason":"tool_calls"}]}`,
+			},
+			wantMessage: "openai-compatible tool call missing function name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(t, w, tt.payloads...)
+			}))
+			defer server.Close()
+
+			provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+			if err != nil {
+				t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+			}
+
+			stream, err := provider.ChatStream(context.Background(), ChatRequest{})
+			if err != nil {
+				t.Fatalf("ChatStream() error = %v", err)
+			}
+			events := collectChatStreamEvents(t, stream)
+
+			var errorText string
+			var sawDone bool
+			for _, event := range events {
+				switch event.Type {
+				case ChatStreamEventTypeError:
+					if event.Err == nil {
+						t.Fatal("error event err = nil")
+					}
+					errorText = event.Err.Error()
+				case ChatStreamEventTypeDone:
+					sawDone = true
+				}
+			}
+			if sawDone {
+				t.Fatalf("unexpected done event: %#v", events)
+			}
+			if !strings.Contains(errorText, tt.wantMessage) {
+				t.Fatalf("error = %q, want %q; events = %#v", errorText, tt.wantMessage, events)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamErrors(t *testing.T) {
 	tests := []struct {
 		name    string
