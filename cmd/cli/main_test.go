@@ -365,6 +365,104 @@ func TestCLIManagedSessionNewAndResumeReuseTranscript(t *testing.T) {
 	}
 }
 
+func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	root := filepath.Join(t.TempDir(), "sessions")
+	clock := time.Date(2026, 7, 8, 13, 0, 0, 0, time.UTC)
+	session.SetNowForTest(t, func() time.Time { return clock })
+	newOpts, err := parseCLIOptions([]string{"--config", providerConfigPath, "--provider", "fake-local", "--new-session", "use calculator to compute 13 * 7"})
+	if err != nil {
+		t.Fatalf("parse new options: %v", err)
+	}
+	firstRunner, managed, err := newCLISessionWithRoot(ctx, newOpts, logger.NewNoop(), root, strings.Join(newOpts.promptArgs, " "))
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() first error = %v", err)
+	}
+	firstOutput, err := collectRunOutput(firstRunner.Prompt(ctx, "use calculator to compute 13 * 7"))
+	if err != nil {
+		t.Fatalf("first collectRunOutput() error = %v", err)
+	}
+	if firstOutput.Answer != "13 * 7 = 91" {
+		t.Fatalf("first answer = %q, want 13 * 7 = 91", firstOutput.Answer)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("first touch error = %v", err)
+	}
+	manager := session.NewManager(root)
+	before, err := manager.Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() before error = %v", err)
+	}
+	clock = clock.Add(time.Second)
+
+	resumeOpts, err := parseCLIOptions([]string{"--config", providerConfigPath, "--provider", "fake-local", "--resume", managed.ID, "what was the previous result?"})
+	if err != nil {
+		t.Fatalf("parse resume options: %v", err)
+	}
+	secondRunner, resumed, err := newCLISessionWithRoot(ctx, resumeOpts, logger.NewNoop(), root, strings.Join(resumeOpts.promptArgs, " "))
+	if err != nil {
+		t.Fatalf("newCLISessionWithRoot() resume error = %v", err)
+	}
+	if resumed == nil || resumed.ID != managed.ID {
+		t.Fatalf("resumed managed session = %#v, want id %q", resumed, managed.ID)
+	}
+	secondOutput, err := collectRunOutput(secondRunner.Prompt(ctx, "what was the previous result?"))
+	if err != nil {
+		t.Fatalf("second collectRunOutput() error = %v", err)
+	}
+	if secondOutput.Answer != "previous result was 91" {
+		t.Fatalf("second answer = %q, want previous result was 91", secondOutput.Answer)
+	}
+	if err := touchManagedSession(ctx, resumed); err != nil {
+		t.Fatalf("second touch error = %v", err)
+	}
+	after, err := manager.Resolve(ctx, managed.ID)
+	if err != nil {
+		t.Fatalf("Resolve() after error = %v", err)
+	}
+	if !after.UpdatedAt.After(before.UpdatedAt) {
+		t.Fatalf("updated_at = %s, want after %s", after.UpdatedAt, before.UpdatedAt)
+	}
+	messages, err := session.LoadMessages(after.Path)
+	if err != nil {
+		t.Fatalf("LoadMessages() error = %v", err)
+	}
+	if len(messages) != 6 {
+		t.Fatalf("messages len = %d, want 6: %#v", len(messages), messages)
+	}
+	firstUser, ok := messages[0].(agent.UserMessage)
+	if !ok || firstUser.Content != "use calculator to compute 13 * 7" {
+		t.Fatalf("first persisted message = %#v, want calculator user prompt", messages[0])
+	}
+	firstAssistantToolCall, ok := messages[1].(agent.AssistantMessage)
+	if !ok || len(firstAssistantToolCall.ToolCalls) != 1 {
+		t.Fatalf("first assistant persisted message = %#v, want one calculator tool call", messages[1])
+	}
+	toolResult, ok := messages[2].(agent.ToolResultMessage)
+	if !ok || toolResult.ToolCallID != firstAssistantToolCall.ToolCalls[0].ID || toolResult.Content != "91" {
+		t.Fatalf("tool result persisted message = %#v, want calculator result 91", messages[2])
+	}
+	firstAssistantAnswer, ok := messages[3].(agent.AssistantMessage)
+	if !ok || firstAssistantAnswer.Content != "13 * 7 = 91" || len(firstAssistantAnswer.ToolCalls) != 0 {
+		t.Fatalf("first assistant answer persisted message = %#v, want final calculator answer", messages[3])
+	}
+	secondUser, ok := messages[4].(agent.UserMessage)
+	if !ok || secondUser.Content != "what was the previous result?" {
+		t.Fatalf("second persisted user message = %#v, want previous-result prompt", messages[4])
+	}
+	secondAssistant, ok := messages[5].(agent.AssistantMessage)
+	if !ok || secondAssistant.Content != "previous result was 91" || len(secondAssistant.ToolCalls) != 0 {
+		t.Fatalf("second persisted assistant message = %#v, want previous-result answer", messages[5])
+	}
+}
+
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)

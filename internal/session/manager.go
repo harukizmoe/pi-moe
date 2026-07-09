@@ -20,6 +20,16 @@ const (
 	untitledSessionTitle      = "untitled session"
 )
 
+// nowUTC 返回当前 UTC 时间；测试可替换它以稳定验证时间相关行为。
+var nowUTC = func() time.Time { return time.Now().UTC() }
+
+// SetNowForTest 在测试中替换 manager 使用的当前时间。
+func SetNowForTest(t interface{ Cleanup(func()) }, now func() time.Time) {
+	old := nowUTC
+	nowUTC = now
+	t.Cleanup(func() { nowUTC = old })
+}
+
 // Manager 管理本地 session index 和 session 文件路径。
 type Manager struct {
 	root string
@@ -37,6 +47,20 @@ type SessionMeta struct {
 	CreatedAt time.Time
 	// UpdatedAt 是最近一次 CLI 使用该 session 的 UTC 时间。
 	UpdatedAt time.Time
+}
+
+type notFoundError struct {
+	id string
+}
+
+func (e notFoundError) Error() string {
+	return fmt.Sprintf("session %q not found", e.id)
+}
+
+// IsNotFound 报告 err 是否表示本地索引中不存在指定 session id。
+func IsNotFound(err error) bool {
+	var target notFoundError
+	return errors.As(err, &target)
 }
 
 type sessionIndex struct {
@@ -72,7 +96,7 @@ func (m *Manager) Create(ctx context.Context, title string) (SessionMeta, error)
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	now := time.Now().UTC()
+	now := nowUTC()
 	id, err := newSessionID(now)
 	if err != nil {
 		return SessionMeta{}, err
@@ -109,7 +133,7 @@ func (m *Manager) Resolve(ctx context.Context, id string) (SessionMeta, error) {
 			return meta.toSessionMeta(), nil
 		}
 	}
-	return SessionMeta{}, fmt.Errorf("session %q not found", id)
+	return SessionMeta{}, notFoundError{id: id}
 }
 
 // List 按 updated_at 倒序返回 session 列表。
@@ -148,12 +172,12 @@ func (m *Manager) Touch(ctx context.Context, id string) error {
 	}
 	for i := range index.Sessions {
 		if index.Sessions[i].ID == id {
-			index.Sessions[i].UpdatedAt = time.Now().UTC()
+			index.Sessions[i].UpdatedAt = nowUTC()
 			index.Current = id
 			return m.saveIndex(index)
 		}
 	}
-	return fmt.Errorf("session %q not found", id)
+	return notFoundError{id: id}
 }
 
 func (m *Manager) indexPath() string {

@@ -97,6 +97,12 @@ func (s *fileStore) load() ([]agent.Message, error) {
 	return messages, nil
 }
 
+// LoadMessages 从持久化文件只读恢复 transcript,不初始化 Agent 或 Provider。
+func LoadMessages(path string) ([]agent.Message, error) {
+	messages, _, err := loadSessionMessages(path)
+	return messages, err
+}
+
 // loadSessionMessages 读取 JSONL 并按最新 leaf 恢复 transcript；没有 leaf 的旧文件按顺序读取 message。
 func loadSessionMessages(path string) ([]agent.Message, string, error) {
 	file, err := os.Open(path)

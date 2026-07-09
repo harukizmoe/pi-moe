@@ -121,3 +121,52 @@ func TestFakeProviderChatStreamReturnsToolCallThenFinalAnswer(t *testing.T) {
 		t.Fatalf("second-round done content = %q", secondDone.Message.Content)
 	}
 }
+
+func TestFakeProviderAnswersPreviousResultFromToolHistory(t *testing.T) {
+	for _, prompt := range []string{"what was the previous result?", "上一轮结果是什么？"} {
+		t.Run(prompt, func(t *testing.T) {
+			provider := &FakeProvider{model: "fake-tool-model"}
+			events, err := provider.ChatStream(context.Background(), ChatRequest{Messages: []Message{
+				{Role: RoleUser, Content: "use calculator to compute 13 * 7"},
+				{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_fake_calculator", Type: "function", Function: ToolCallFunction{Name: "calculator", Arguments: `{"a":13,"b":7,"op":"mul"}`}}}},
+				{Role: RoleTool, ToolCallID: "call_fake_calculator", Content: "91"},
+				{Role: RoleAssistant, Content: "13 * 7 = 91"},
+				{Role: RoleUser, Content: prompt},
+			}})
+			if err != nil {
+				t.Fatalf("ChatStream() error = %v", err)
+			}
+
+			message := collectFakeDoneMessage(t, events)
+			if message.Content != "previous result was 91" {
+				t.Fatalf("previous result answer = %q, want previous result was 91", message.Content)
+			}
+		})
+	}
+}
+
+func TestFakeProviderReportsMissingPreviousResultWithoutToolHistory(t *testing.T) {
+	provider := &FakeProvider{model: "fake-tool-model"}
+	events, err := provider.ChatStream(context.Background(), ChatRequest{Messages: []Message{
+		{Role: RoleUser, Content: "what was the previous result?"},
+	}})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+
+	message := collectFakeDoneMessage(t, events)
+	if message.Content != "no previous result found" {
+		t.Fatalf("previous result answer = %q, want no previous result found", message.Content)
+	}
+}
+
+func collectFakeDoneMessage(t *testing.T, events <-chan ChatStreamEvent) Message {
+	t.Helper()
+	for event := range events {
+		if event.Type == ChatStreamEventTypeDone {
+			return event.Message
+		}
+	}
+	t.Fatal("stream ended without done event")
+	return Message{}
+}

@@ -1,6 +1,9 @@
 package llms
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // FakeProvider 是用于无网络测试 tool calling 的确定性 Provider。
 type FakeProvider struct {
@@ -13,6 +16,18 @@ func NewFakeProvider(cfg ProviderConfig) (Provider, error) {
 }
 
 func (p *FakeProvider) fakeChatMessage(req ChatRequest) Message {
+	// 如果最后一个用户问题询问上一轮结果，则从恢复的工具历史中回答。
+	if asksPreviousResult(req.Messages) {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			msg := req.Messages[i]
+			result := strings.TrimSpace(msg.Content)
+			if msg.Role == RoleTool && result != "" {
+				return Message{Role: RoleAssistant, Content: "previous result was " + result}
+			}
+		}
+		return Message{Role: RoleAssistant, Content: "no previous result found"}
+	}
+
 	// 如果 agent 已经执行过工具，则用该工具结果结束 fake 对话。
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		msg := req.Messages[i]
@@ -33,6 +48,18 @@ func (p *FakeProvider) fakeChatMessage(req ChatRequest) Message {
 			},
 		}},
 	}
+}
+
+func asksPreviousResult(messages []Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != RoleUser {
+			continue
+		}
+		content := strings.ToLower(msg.Content)
+		return strings.Contains(content, "previous result") || strings.Contains(content, "上一轮结果")
+	}
+	return false
 }
 
 // ChatStream 返回确定性的 fake provider-neutral streaming 事件。
