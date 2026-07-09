@@ -74,12 +74,12 @@ func toLLMMessages(messages []Message) ([]llms.Message, error) {
 	return out, nil
 }
 
-func toLLMMessagesWithSystemPrompt(messages []Message, systemPrompt string) ([]llms.Message, error) {
+func toLLMMessagesWithPrompts(messages []Message, baseSystemPrompt string, sessionPrompt string) ([]llms.Message, error) {
 	converted, err := toLLMMessages(messages)
 	if err != nil {
 		return nil, err
 	}
-	prompt := strings.TrimSpace(systemPrompt)
+	prompt := combineSystemPrompts(baseSystemPrompt, sessionPrompt)
 	if prompt == "" {
 		return converted, nil
 	}
@@ -87,6 +87,21 @@ func toLLMMessagesWithSystemPrompt(messages []Message, systemPrompt string) ([]l
 	out = append(out, llms.Message{Role: llms.RoleSystem, Content: prompt})
 	out = append(out, converted...)
 	return out, nil
+}
+
+func combineSystemPrompts(baseSystemPrompt string, sessionPrompt string) string {
+	base := strings.TrimSpace(baseSystemPrompt)
+	session := strings.TrimSpace(sessionPrompt)
+	if base == "" && session == "" {
+		return ""
+	}
+	if base == "" {
+		return "Session prompt:\n" + session
+	}
+	if session == "" {
+		return base
+	}
+	return base + "\n\nSession prompt:\n" + session
 }
 
 func validateToolResultOrder(index int, message llms.Message, pendingToolCalls []llms.ToolCall) error {
