@@ -53,7 +53,7 @@ func SetNowForTest(t interface{ Cleanup(func()) }, now func() time.Time) {
 	t.Cleanup(func() { nowUTC = old })
 }
 
-// Manager 管理本地 session index 和 session 文件路径。
+// Manager 是基于本地 index.json 的 file-backed SessionStore 实现。
 type Manager struct {
 	root string
 	mu   sync.Mutex

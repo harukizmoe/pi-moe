@@ -316,6 +316,31 @@ func TestManagerTimestampsAreUTC(t *testing.T) {
 	}
 }
 
+func TestSessionStoreInterfaceUsesManagerOwnershipRules(t *testing.T) {
+	var store SessionStore = NewManager(filepath.Join(t.TempDir(), "sessions"))
+	ctx := context.Background()
+	alice := Actor{UserID: "alice"}
+	bob := Actor{UserID: "bob"}
+
+	created, err := store.Create(ctx, alice, "alice prompt", SessionConfig{ProviderName: "fake"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.OwnerID != "alice" {
+		t.Fatalf("Create() OwnerID = %q, want alice", created.OwnerID)
+	}
+	if _, err := store.Resolve(ctx, bob, created.ID); !IsNotFound(err) {
+		t.Fatalf("Resolve() bob error = %v, want not found", err)
+	}
+	listed, err := store.List(ctx, alice)
+	if err != nil {
+		t.Fatalf("List() alice error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("List() alice = %#v, want created session", listed)
+	}
+}
+
 func TestManagerCreateResolveListFiltersByOwner(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "sessions"))
 	alice := Actor{UserID: "alice"}
