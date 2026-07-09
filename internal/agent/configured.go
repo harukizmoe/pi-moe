@@ -22,6 +22,8 @@ type Config struct {
 	Logger logger.Logger
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
 	MaxSteps int
+	// SystemPrompt 是每次请求模型时注入的系统级指令；为空时不注入。
+	SystemPrompt string
 }
 
 // NewConfigured 从配置文件组装 Provider、工具注册表和 Agent。
@@ -64,7 +66,8 @@ func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
 	toolRegistry.Register(tools.Calculator{})
 
 	return NewWithOptions(provider, toolRegistry, providerConfig.Model, Options{
-		Logger:   cfg.Logger,
-		MaxSteps: cfg.MaxSteps,
+		Logger:       cfg.Logger,
+		MaxSteps:     cfg.MaxSteps,
+		SystemPrompt: cfg.SystemPrompt,
 	}), nil
 }

@@ -3,6 +3,9 @@ package service_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -86,6 +89,86 @@ func TestSessionServiceCreateStoresConfigSummary(t *testing.T) {
 		t.Fatalf("Create() Config = %#v, want provider fake-local and max_steps 3", created.Config)
 	}
 }
+
+func TestSessionServiceRunAppliesStoredSystemPromptToProviderRequestWithoutPersistingIt(t *testing.T) {
+	ctx := context.Background()
+	systemPrompt := "private managed run system prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed run", appservice.CreateOptions{SystemPrompt: systemPrompt})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SystemPrompt != systemPrompt {
+		t.Fatalf("created SystemPrompt = %q, want stored prompt", created.Config.SystemPrompt)
+	}
+
+	result, err := svc.Run(ctx, created.ID, "hello from managed run")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Answer != "managed answer" {
+		t.Fatalf("Run() Answer = %q, want managed answer", result.Answer)
+	}
+	captured := receiveOpenAIRequest(t, requests)
+	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, systemPrompt, "hello from managed run")
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, systemPrompt, "hello from managed run")
+}
+
+func TestSessionServiceStreamAppliesStoredSystemPromptToProviderRequestWithoutPersistingIt(t *testing.T) {
+	ctx := context.Background()
+	systemPrompt := "private managed stream system prompt"
+	server, requests := newCapturingOpenAICompatibleServer(t)
+	defer server.Close()
+
+	store := appdata.NewManagerSessionStore(filepath.Join(t.TempDir(), "sessions"))
+	svc, err := appservice.NewSessionService(appservice.SessionConfig{
+		Store:              store,
+		ProviderConfigPath: writeOpenAICompatibleProvidersConfig(t, server.URL+"/v1"),
+		ProviderName:       "test-openai",
+	})
+	if err != nil {
+		t.Fatalf("NewSessionService() error = %v", err)
+	}
+	created, err := svc.Create(ctx, "managed stream", appservice.CreateOptions{SystemPrompt: systemPrompt})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.Config.SystemPrompt != systemPrompt {
+		t.Fatalf("created SystemPrompt = %q, want stored prompt", created.Config.SystemPrompt)
+	}
+
+	events, err := svc.Stream(ctx, created.ID, "hello from managed stream")
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	got := collectStreamEvents(t, events)
+	assertHasStreamEvent(t, got, "done", map[string]any{"answer": "managed answer"})
+	captured := receiveOpenAIRequest(t, requests)
+	assertProviderReceivedSystemPromptBeforeUser(t, captured.Messages, systemPrompt, "hello from managed stream")
+
+	detail, err := svc.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	assertTranscriptDoesNotIncludeSystemPrompt(t, detail.Messages, systemPrompt, "hello from managed stream")
+}
+
 
 func TestSessionServiceCreatePinsResolvedDefaultProvider(t *testing.T) {
 	ctx := context.Background()
@@ -444,6 +527,109 @@ func TestSessionServiceGetReturnsMalformedToolArgumentsAsJSONString(t *testing.T
 	}
 	if !strings.Contains(string(payload), `"Arguments":"{bad json"`) {
 		t.Fatalf("marshaled messages = %s, want malformed arguments preserved as JSON string", payload)
+	}
+}
+
+type capturedOpenAIChatRequest struct {
+	Messages []capturedOpenAIChatMessage `json:"messages"`
+}
+
+type capturedOpenAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+}
+
+func newCapturingOpenAICompatibleServer(t *testing.T) (*httptest.Server, <-chan capturedOpenAIChatRequest) {
+	t.Helper()
+	requests := make(chan capturedOpenAIChatRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %q, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var captured capturedOpenAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode OpenAI-compatible request: %v", err)
+		}
+		requests <- captured
+		writeServiceOpenAISSE(t, w,
+			`{"choices":[{"delta":{"role":"assistant"}}]}`,
+			`{"choices":[{"delta":{"content":"managed answer"}}]}`,
+			`{"choices":[{"finish_reason":"stop"}]}`,
+		)
+	}))
+	return server, requests
+}
+
+func writeOpenAICompatibleProvidersConfig(t *testing.T, baseURL string) string {
+	t.Helper()
+	return writeProvidersConfigContent(t, fmt.Sprintf(`llms:
+  default_provider: test-openai
+  providers:
+    test-openai:
+      type: openai_compatible
+      base_url: %q
+      model: test-model
+      timeout_seconds: 1
+`, baseURL))
+}
+
+func writeServiceOpenAISSE(t *testing.T, w http.ResponseWriter, payloads ...string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		t.Fatal("response writer does not support flushing")
+	}
+	for _, payload := range payloads {
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			t.Fatalf("write SSE payload: %v", err)
+		}
+		flusher.Flush()
+	}
+}
+
+func receiveOpenAIRequest(t *testing.T, requests <-chan capturedOpenAIChatRequest) capturedOpenAIChatRequest {
+	t.Helper()
+	select {
+	case captured := <-requests:
+		return captured
+	default:
+		t.Fatal("OpenAI-compatible server did not receive a chat completions request")
+		return capturedOpenAIChatRequest{}
+	}
+}
+
+func assertProviderReceivedSystemPromptBeforeUser(t *testing.T, messages []capturedOpenAIChatMessage, systemPrompt string, userPrompt string) {
+	t.Helper()
+	if len(messages) < 2 {
+		t.Fatalf("provider messages = %#v, want system prompt followed by user prompt", messages)
+	}
+	if messages[0].Role != "system" || messages[0].Content != systemPrompt {
+		t.Fatalf("first provider message = %#v, want system prompt %q", messages[0], systemPrompt)
+	}
+	if messages[1].Role != "user" || messages[1].Content != userPrompt {
+		t.Fatalf("second provider message = %#v, want user prompt %q", messages[1], userPrompt)
+	}
+}
+
+func assertTranscriptDoesNotIncludeSystemPrompt(t *testing.T, messages []appservice.SessionMessage, systemPrompt string, userPrompt string) {
+	t.Helper()
+	if len(messages) != 2 {
+		t.Fatalf("detail Messages len = %d, want user and assistant only: %#v", len(messages), messages)
+	}
+	if messages[0].Role != "user" || messages[0].Content != userPrompt {
+		t.Fatalf("first transcript message = %#v, want user prompt %q", messages[0], userPrompt)
+	}
+	if messages[1].Role != "assistant" || messages[1].Content != "managed answer" {
+		t.Fatalf("second transcript message = %#v, want assistant managed answer", messages[1])
+	}
+	for _, message := range messages {
+		if message.Role == "system" || strings.Contains(message.Content, systemPrompt) {
+			t.Fatalf("transcript leaks system prompt %q in %#v", systemPrompt, messages)
+		}
 	}
 }
 

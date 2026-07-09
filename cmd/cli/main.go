@@ -86,6 +86,10 @@ type cliOptions struct {
 	configPath string
 	// providerName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
 	providerName string
+	// maxSteps 限制本次或 managed session 恢复后的 tool-calling 轮数；小于 1 表示使用默认/已存储值。
+	maxSteps int
+	// systemPrompt 是本次或 managed session 恢复后的系统级指令；不会写入 transcript。
+	systemPrompt string
 	// sessionPath 非空时启用 JSONL 会话恢复，空值保持一次性内存会话。
 	sessionPath string
 	// newSession 表示创建 manager-managed session 并用本轮 prompt 作为标题来源。
@@ -108,6 +112,8 @@ func parseCLIOptions(args []string) (cliOptions, error) {
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.providerName, "provider", "", "provider instance name")
+	flags.IntVar(&opts.maxSteps, "max-steps", 0, "maximum tool-calling rounds for this run/session")
+	flags.StringVar(&opts.systemPrompt, "system-prompt", "", "system prompt for this run/session")
 	flags.StringVar(&opts.sessionPath, "session", "", "session JSONL path")
 	flags.BoolVar(&opts.includeTrace, "trace", false, "print tool trace")
 	flags.BoolVar(&opts.interactive, "interactive", false, "read prompts line by line until quit or EOF")
@@ -138,18 +144,23 @@ func validateCLIOptions(opts cliOptions) error {
 	if opts.newSession && hasResume {
 		return fmt.Errorf("--new-session and --resume are mutually exclusive")
 	}
+	if opts.maxSteps < 0 {
+		return fmt.Errorf("--max-steps must not be negative")
+	}
 	if opts.listSessions {
-		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume {
-			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, or --resume")
+		if len(opts.promptArgs) > 0 || opts.interactive || hasManualSession || opts.newSession || hasResume || opts.maxSteps > 0 || strings.TrimSpace(opts.systemPrompt) != "" {
+			return fmt.Errorf("--list-sessions cannot be combined with prompt, --interactive, --session, --new-session, --resume, --max-steps, or --system-prompt")
 		}
 	}
 	return nil
 }
 
 type cliManagedSession struct {
-	manager          *session.Manager
-	ID               string
-	providerOverride string
+	manager              *session.Manager
+	ID                   string
+	providerOverride     string
+	maxStepsOverride     int
+	systemPromptOverride string
 }
 
 // newCLISession 根据 session 选项创建内存、显式 JSONL 或 manager-managed Session。
@@ -162,7 +173,9 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 	cfg := session.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
+		SystemPrompt:       strings.TrimSpace(opts.systemPrompt),
 		Logger:             appLogger,
+		MaxSteps:           opts.maxSteps,
 	}
 	if strings.TrimSpace(opts.sessionPath) != "" {
 		runner, err := session.Open(ctx, cfg, opts.sessionPath)
@@ -171,11 +184,13 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 
 	manager := session.NewManager(sessionRoot)
 	if opts.newSession {
-		createCfg, err := newCLIManagedSessionConfig(opts.configPath, opts.providerName)
+		createCfg, err := newCLIManagedSessionConfig(opts)
 		if err != nil {
 			return nil, nil, err
 		}
 		cfg.ProviderName = createCfg.ProviderName
+		cfg.SystemPrompt = createCfg.SystemPrompt
+		cfg.MaxSteps = createCfg.MaxSteps
 		meta, err := manager.Create(ctx, title, createCfg)
 		if err != nil {
 			return nil, nil, err
@@ -184,7 +199,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, systemPromptOverride: opts.systemPrompt}, nil
 	}
 
 	if strings.TrimSpace(opts.resumeSessionID) != "" {
@@ -197,27 +212,40 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 			runProvider = meta.Config.ProviderName
 		}
 		cfg.ProviderName = runProvider
+		if opts.maxSteps > 0 {
+			cfg.MaxSteps = opts.maxSteps
+		} else {
+			cfg.MaxSteps = meta.Config.MaxSteps
+		}
+		if systemPrompt := strings.TrimSpace(opts.systemPrompt); systemPrompt != "" {
+			cfg.SystemPrompt = systemPrompt
+		} else {
+			cfg.SystemPrompt = meta.Config.SystemPrompt
+		}
 		runner, err := session.Open(ctx, cfg, meta.Path)
 		if err != nil {
 			return nil, nil, err
 		}
-		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName}, nil
+		return runner, &cliManagedSession{manager: manager, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, systemPromptOverride: opts.systemPrompt}, nil
 	}
 
 	runner, err := session.New(ctx, cfg)
 	return runner, nil, err
 }
 
-func newCLIManagedSessionConfig(configPath string, providerName string) (session.SessionConfig, error) {
-	providerName = strings.TrimSpace(providerName)
+func newCLIManagedSessionConfig(opts cliOptions) (session.SessionConfig, error) {
+	providerName := strings.TrimSpace(opts.providerName)
+	cfg := session.SessionConfig{SystemPrompt: strings.TrimSpace(opts.systemPrompt), MaxSteps: opts.maxSteps}
 	if providerName != "" {
-		return session.SessionConfig{ProviderName: providerName}, nil
+		cfg.ProviderName = providerName
+		return cfg, nil
 	}
-	loaded, err := appconfig.Load(configPath)
+	loaded, err := appconfig.Load(opts.configPath)
 	if err != nil {
 		return session.SessionConfig{}, err
 	}
-	return session.SessionConfig{ProviderName: strings.TrimSpace(loaded.LLMs.DefaultProvider)}, nil
+	cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
+	return cfg, nil
 }
 
 func touchManagedSession(ctx context.Context, managed *cliManagedSession) error {
@@ -225,13 +253,22 @@ func touchManagedSession(ctx context.Context, managed *cliManagedSession) error 
 		return nil
 	}
 	providerOverride := strings.TrimSpace(managed.providerOverride)
-	if providerOverride != "" {
+	systemPromptOverride := strings.TrimSpace(managed.systemPromptOverride)
+	if providerOverride != "" || managed.maxStepsOverride > 0 || systemPromptOverride != "" {
 		meta, err := managed.manager.Resolve(ctx, managed.ID)
 		if err != nil {
 			return err
 		}
 		cfg := meta.Config
-		cfg.ProviderName = providerOverride
+		if providerOverride != "" {
+			cfg.ProviderName = providerOverride
+		}
+		if managed.maxStepsOverride > 0 {
+			cfg.MaxSteps = managed.maxStepsOverride
+		}
+		if systemPromptOverride != "" {
+			cfg.SystemPrompt = systemPromptOverride
+		}
 		return managed.manager.UpdateConfig(ctx, managed.ID, cfg)
 	}
 	return managed.manager.Touch(ctx, managed.ID)

@@ -23,7 +23,7 @@ type SessionConfig struct {
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
 	ProviderName string
-	// SystemPrompt 保存新 session 的行为设定；当前 Agent 配置不消费该字段，仅持久化到 metadata。
+	// SystemPrompt 保存新 session 的行为设定，并在运行时作为系统级指令注入 Agent。
 	SystemPrompt string
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
 	MaxSteps int
@@ -193,10 +193,11 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
+			SystemPrompt:       strings.TrimSpace(cfg.SystemPrompt),
 			Logger:             cfg.Logger,
 			MaxSteps:           cfg.MaxSteps,
 		},
-		systemPrompt: cfg.SystemPrompt,
+		systemPrompt: strings.TrimSpace(cfg.SystemPrompt),
 	}, nil
 }
 
@@ -316,6 +317,9 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 	runCfg.ProviderName = providerName
 	if meta.Config.MaxSteps > 0 {
 		runCfg.MaxSteps = meta.Config.MaxSteps
+	}
+	if systemPrompt := strings.TrimSpace(meta.Config.SystemPrompt); systemPrompt != "" {
+		runCfg.SystemPrompt = systemPrompt
 	}
 	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {
 		if meta.Config.ProviderName != "" && !override {

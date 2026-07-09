@@ -74,6 +74,21 @@ func toLLMMessages(messages []Message) ([]llms.Message, error) {
 	return out, nil
 }
 
+func toLLMMessagesWithSystemPrompt(messages []Message, systemPrompt string) ([]llms.Message, error) {
+	converted, err := toLLMMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+	prompt := strings.TrimSpace(systemPrompt)
+	if prompt == "" {
+		return converted, nil
+	}
+	out := make([]llms.Message, 0, len(converted)+1)
+	out = append(out, llms.Message{Role: llms.RoleSystem, Content: prompt})
+	out = append(out, converted...)
+	return out, nil
+}
+
 func validateToolResultOrder(index int, message llms.Message, pendingToolCalls []llms.ToolCall) error {
 	switch message.Role {
 	case llms.RoleAssistant:
