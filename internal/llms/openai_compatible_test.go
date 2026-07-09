@@ -3,6 +3,7 @@ package llms
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -291,6 +292,58 @@ func TestOpenAICompatibleProviderStatusErrorsAreStableAndRedacted(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestOpenAICompatibleProviderRequestErrorsKeepContextSemantics(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(50 * time.Millisecond)
+		}))
+		defer server.Close()
+
+		provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 1})
+		if err != nil {
+			t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		defer cancel()
+		_, err = CollectChat(ctx, provider, ChatRequest{})
+		if err == nil {
+			t.Fatal("CollectChat() error = nil")
+		}
+		if !strings.Contains(err.Error(), "openai-compatible chat completions request") {
+			t.Fatalf("error missing request stage: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want context deadline semantics", err)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("server should not receive canceled request")
+		}))
+		defer server.Close()
+
+		provider, err := NewOpenAICompatibleProvider(ProviderConfig{BaseURL: server.URL, TimeoutSeconds: 3})
+		if err != nil {
+			t.Fatalf("NewOpenAICompatibleProvider() error = %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = CollectChat(ctx, provider, ChatRequest{})
+		if err == nil {
+			t.Fatal("CollectChat() error = nil")
+		}
+		if !strings.Contains(err.Error(), "openai-compatible chat completions request") {
+			t.Fatalf("error missing request stage: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled semantics", err)
+		}
+	})
 }
 
 func TestOpenAICompatibleProviderNormalizesMissingToolCallTypeToFunction(t *testing.T) {

@@ -218,7 +218,7 @@ func (p *OpenAICompatibleProvider) doChatCompletions(ctx context.Context, req Ch
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("send openai chat request: %w", err)
+		return nil, fmt.Errorf("openai-compatible chat completions request: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		err := openAIStatusError(resp)
