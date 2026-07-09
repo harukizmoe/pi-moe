@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"harukizmoe/pimoe/internal/llms"
 )
@@ -24,8 +25,15 @@ func (r *Registry) Register(tool Tool) {
 
 // Schemas 将已注册工具转换为 OpenAI-compatible function schema。
 func (r *Registry) Schemas() []llms.Tool {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	schemas := make([]llms.Tool, 0, len(r.tools))
-	for _, tool := range r.tools {
+	for _, name := range names {
+		tool := r.tools[name]
 		schemas = append(schemas, llms.Tool{
 			Type: "function",
 			Function: llms.ToolFunction{

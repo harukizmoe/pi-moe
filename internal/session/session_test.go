@@ -341,7 +341,7 @@ func TestSessionPromptRejectsEmptyInputWithoutTranscriptMutation(t *testing.T) {
 
 func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testing.T) {
 	provider := newBlockingProvider()
-	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model"), listeners: make(map[chan Event]struct{})}
+	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model")}
 
 	first := s.Prompt(context.Background(), "first prompt")
 	firstDone := make(chan []Event, 1)
@@ -384,7 +384,7 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 
 func TestSessionCancelEmitsTerminalErrorEvent(t *testing.T) {
 	provider := newBlockingProvider()
-	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model"), listeners: make(map[chan Event]struct{})}
+	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model")}
 
 	stream := s.Prompt(context.Background(), "first prompt")
 	eventsDone := make(chan []Event, 1)
@@ -425,7 +425,7 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 	provider := &maxStepLoopProvider{t: t}
-	s := &Session{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1}), listeners: make(map[chan Event]struct{})}
+	s := &Session{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1})}
 
 	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "compute (2 + 3) * 4"))
 	errEvent, ok := events[len(events)-1].(ErrorEvent)
