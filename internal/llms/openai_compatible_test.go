@@ -722,8 +722,8 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				if errorText == "" {
 					t.Fatalf("events missing error event: %#v", events)
 				}
-				if !strings.Contains(errorText, "decode") && !strings.Contains(errorText, "unmarshal") {
-					t.Fatalf("error missing decode context: %q", errorText)
+				if !strings.Contains(errorText, "parse openai-compatible stream chunk") {
+					t.Fatalf("error missing parse context: %q", errorText)
 				}
 				if sawDone {
 					t.Fatalf("unexpected done event: %#v", events)
@@ -758,8 +758,8 @@ func TestOpenAICompatibleProviderChatStreamSurfacesStatusAndMalformedStreamError
 				if errorText == "" {
 					t.Fatalf("events missing error event: %#v", events)
 				}
-				if !strings.Contains(errorText, "openai chat stream") {
-					t.Fatalf("error missing openai chat stream context: %q", errorText)
+				if !strings.Contains(errorText, "openai-compatible stream error") {
+					t.Fatalf("error missing stream error context: %q", errorText)
 				}
 				if !strings.Contains(errorText, "quota exhausted") {
 					t.Fatalf("error missing quota message: %q", errorText)
@@ -841,8 +841,8 @@ func TestOpenAICompatibleProviderChatStreamReturnsErrorWhenStreamEndsWithoutDone
 			if sawDone {
 				t.Fatalf("unexpected done event: %#v", events)
 			}
-			if !strings.Contains(errorText, "ended without done") {
-				t.Fatalf("error missing ended without done: %#v", events)
+			if !strings.Contains(errorText, "openai-compatible stream ended before completion") {
+				t.Fatalf("error missing ended before completion: %#v", events)
 			}
 		})
 	}

@@ -128,16 +128,16 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 		var toolCalls []openAIToolCall
 		for {
 			if err := ctx.Err(); err != nil {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream context: %w", err)}
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai-compatible stream context: %w", err)}
 				return
 			}
 
 			payload, err := readOpenAIStreamData(reader)
 			if err != nil {
 				if err == io.EOF {
-					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai chat stream ended without done")}
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("openai-compatible stream ended before completion")}
 				} else {
-					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("read openai chat stream: %w", err)}
+					events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("read openai-compatible stream: %w", err)}
 				}
 				return
 			}
@@ -151,7 +151,7 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 
 			var decoded openAIChatStreamResponse
 			if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
-				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("unmarshal openai chat stream chunk: %w", err)}
+				events <- ChatStreamEvent{Type: ChatStreamEventTypeError, Err: fmt.Errorf("parse openai-compatible stream chunk: %w", err)}
 				return
 			}
 			if decoded.Error != nil {
@@ -244,9 +244,9 @@ func openAIStatusError(resp *http.Response) error {
 func openAIStreamResponseError(streamErr *openAIStreamError) error {
 	message := strings.TrimSpace(streamErr.Message)
 	if message == "" {
-		return fmt.Errorf("openai chat stream returned error")
+		return fmt.Errorf("openai-compatible stream error")
 	}
-	return fmt.Errorf("openai chat stream returned error: %s", message)
+	return fmt.Errorf("openai-compatible stream error: %s", message)
 }
 
 func readOpenAIStreamData(reader *bufio.Reader) (string, error) {
