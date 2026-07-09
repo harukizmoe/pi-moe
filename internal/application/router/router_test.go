@@ -24,11 +24,11 @@ type sessionConfigResponse struct {
 }
 
 type sessionResponse struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
-	Config   sessionConfigResponse `json:"config"`
+	ID        string                `json:"id"`
+	Title     string                `json:"title"`
+	CreatedAt string                `json:"created_at"`
+	UpdatedAt string                `json:"updated_at"`
+	Config    sessionConfigResponse `json:"config"`
 }
 
 type sessionDetailResponse struct {
@@ -36,7 +36,7 @@ type sessionDetailResponse struct {
 	Title     string                   `json:"title"`
 	CreatedAt string                   `json:"created_at"`
 	UpdatedAt string                   `json:"updated_at"`
-	Config   sessionConfigResponse `json:"config"`
+	Config    sessionConfigResponse    `json:"config"`
 	Messages  []sessionMessageResponse `json:"messages"`
 }
 
@@ -159,11 +159,11 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	createdBody := created.Body.String()
 	assertBodyContains(t, createdBody, `"config":{"provider_name":"fake-local"`)
 	assertBodyContains(t, createdBody, `"max_steps":4`)
-	assertBodyContains(t, createdBody, `"has_system_prompt":true`)
+	assertBodyNotContains(t, createdBody, `"has_system_prompt"`)
 	assertBodyNotContains(t, createdBody, "private system prompt")
 	assertBodyNotContains(t, createdBody, `"system_prompt":`)
 	createdSession := decodeJSONString[sessionResponse](t, createdBody)
-	assertConfigSummary(t, createdSession.Config, "fake-local", 4, true)
+	assertConfigSummary(t, createdSession.Config, "fake-local", 4, false)
 
 	listed := getJSON(t, handler, "/v1/sessions")
 	assertStatus(t, listed, http.StatusOK)
@@ -175,7 +175,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	if len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.ID {
 		t.Fatalf("GET /v1/sessions = %#v, want created session %q", listedSessions, createdSession.ID)
 	}
-	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-local", 4, true)
+	assertConfigSummary(t, listedSessions.Sessions[0].Config, "fake-local", 4, false)
 
 	detail := getJSON(t, handler, "/v1/sessions/"+createdSession.ID)
 	assertStatus(t, detail, http.StatusOK)
@@ -184,7 +184,7 @@ func TestRouterSessionResponsesIncludeConfigSummary(t *testing.T) {
 	assertBodyNotContains(t, detailBody, "private system prompt")
 	assertBodyNotContains(t, detailBody, `"system_prompt":`)
 	detailSession := decodeJSONString[sessionDetailResponse](t, detailBody)
-	assertConfigSummary(t, detailSession.Config, "fake-local", 4, true)
+	assertConfigSummary(t, detailSession.Config, "fake-local", 4, false)
 }
 
 func TestRouterCreateAcceptsConfigOverridesWithoutExposingSystemPrompt(t *testing.T) {
@@ -500,7 +500,7 @@ func newTestRouterWithConfig(t *testing.T, cfg testRouterConfig) http.Handler {
 		Store:              appdata.NewManagerSessionStore(cfg.root),
 		ProviderConfigPath: cfg.providerConfigPath,
 		ProviderName:       cfg.providerName,
-		SystemPrompt:       cfg.systemPrompt,
+		BaseSystemPrompt:   cfg.systemPrompt,
 		MaxSteps:           cfg.maxSteps,
 	})
 	if err != nil {

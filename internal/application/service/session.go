@@ -23,8 +23,8 @@ type SessionConfig struct {
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
 	ProviderName string
-	// SystemPrompt 保存新 session 的行为设定，并在运行时作为系统级指令注入 Agent。
-	SystemPrompt string
+	// BaseSystemPrompt 保存项目级基础系统指令；不会持久化到 session metadata。
+	BaseSystemPrompt string
 	// MaxSteps 限制一次运行最多执行多少轮 tool calling；小于 1 时使用 Agent 默认值。
 	MaxSteps int
 	// Logger 接收 Agent 运行日志；为空时使用 no-op logger。
@@ -33,9 +33,9 @@ type SessionConfig struct {
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	store        data.SessionStore
-	config       session.Config
-	systemPrompt string
+	store            data.SessionStore
+	config           session.Config
+	baseSystemPrompt string
 }
 
 // SessionMeta 描述一个可由应用层返回给调用方的本地 session。
@@ -90,8 +90,8 @@ type RunOptions struct {
 type CreateOptions struct {
 	// ProviderName 覆盖新 session 使用的 Provider；为空时使用服务配置或 llms.default_provider。
 	ProviderName string
-	// SystemPrompt 覆盖新 session 的行为设定；为空时使用服务配置。
-	SystemPrompt string
+	// SessionPrompt 覆盖新 session 的行为设定；为空时不持久化 session prompt。
+	SessionPrompt string
 	// MaxSteps 覆盖新 session 的 tool-calling 最大轮数；小于 1 时使用服务配置。
 	MaxSteps int
 }
@@ -192,11 +192,11 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 		config: session.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
-			BaseSystemPrompt:   strings.TrimSpace(cfg.SystemPrompt),
+			BaseSystemPrompt:   strings.TrimSpace(cfg.BaseSystemPrompt),
 			Logger:             cfg.Logger,
 			MaxSteps:           cfg.MaxSteps,
 		},
-		systemPrompt: strings.TrimSpace(cfg.SystemPrompt),
+		baseSystemPrompt: strings.TrimSpace(cfg.BaseSystemPrompt),
 	}, nil
 }
 
@@ -260,9 +260,8 @@ func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOp
 		}
 	}
 	cfg := session.SessionConfig{
-		ProviderName:  strings.TrimSpace(s.config.ProviderName),
-		SessionPrompt: strings.TrimSpace(s.systemPrompt),
-		MaxSteps:      s.config.MaxSteps,
+		ProviderName: strings.TrimSpace(s.config.ProviderName),
+		MaxSteps:     s.config.MaxSteps,
 	}
 	if providerName := strings.TrimSpace(opts.ProviderName); providerName != "" {
 		cfg.ProviderName = providerName
@@ -273,8 +272,8 @@ func (s *SessionService) defaultSessionConfig(ctx context.Context, opts CreateOp
 		}
 		cfg.ProviderName = strings.TrimSpace(loaded.LLMs.DefaultProvider)
 	}
-	if systemPrompt := strings.TrimSpace(opts.SystemPrompt); systemPrompt != "" {
-		cfg.SessionPrompt = systemPrompt
+	if sessionPrompt := strings.TrimSpace(opts.SessionPrompt); sessionPrompt != "" {
+		cfg.SessionPrompt = sessionPrompt
 	}
 	if opts.MaxSteps > 0 {
 		cfg.MaxSteps = opts.MaxSteps
@@ -313,11 +312,12 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 
 	runCfg := s.config
 	runCfg.ProviderName = providerName
+	runCfg.BaseSystemPrompt = strings.TrimSpace(s.baseSystemPrompt)
 	if meta.Config.MaxSteps > 0 {
 		runCfg.MaxSteps = meta.Config.MaxSteps
 	}
-	if systemPrompt := strings.TrimSpace(meta.Config.SessionPrompt); systemPrompt != "" && systemPrompt != strings.TrimSpace(runCfg.BaseSystemPrompt) {
-		runCfg.SessionPrompt = systemPrompt
+	if sessionPrompt := strings.TrimSpace(meta.Config.SessionPrompt); sessionPrompt != "" {
+		runCfg.SessionPrompt = sessionPrompt
 	}
 	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {
 		if meta.Config.ProviderName != "" && !override {

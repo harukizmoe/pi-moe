@@ -120,7 +120,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 	if title == "" {
 		title = strings.TrimSpace(req.Input)
 	}
-	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SystemPrompt: req.SystemPrompt})
+	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SystemPrompt})
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
