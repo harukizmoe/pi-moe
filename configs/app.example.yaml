@@ -1,0 +1,14 @@
+server:
+  addr: ":8080"
+
+session:
+  root: ".moe/sessions"
+  store:
+    type: postgres
+    postgres:
+      user: pimoe
+      password_env: PIMOE_POSTGRES_PASSWORD
+      host_env: PIMOE_POSTGRES_HOST
+      port: 5432
+      database: pimoe
+      sslmode: disable
