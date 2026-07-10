@@ -2,7 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -96,6 +99,22 @@ func Load(path string) (*Config, error) {
 
 // LoadApp 读取应用运行时 YAML 配置，并解析 PostgreSQL host/password 环境变量。
 func LoadApp(path string) (*AppConfig, error) {
+	cfg, err := loadApp(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := populatePostgresDSN(cfg); err != nil {
+		return nil, fmt.Errorf("validate app config %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// LoadAppDefaults 读取应用运行时 YAML 配置，但不解析环境变量；用于先应用 flag 覆盖。
+func LoadAppDefaults(path string) (*AppConfig, error) {
+	return loadApp(path)
+}
+
+func loadApp(path string) (*AppConfig, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetConfigType("yaml")
@@ -106,9 +125,6 @@ func LoadApp(path string) (*AppConfig, error) {
 	var cfg AppConfig
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return nil, fmt.Errorf("decode app config %q: %w", path, err)
-	}
-	if err := populatePostgresDSN(&cfg); err != nil {
-		return nil, fmt.Errorf("validate app config %q: %w", path, err)
 	}
 	return &cfg, nil
 }
@@ -150,7 +166,16 @@ func populatePostgresDSN(cfg *AppConfig) error {
 		sslmode = "disable"
 	}
 	pg.SSLMode = sslmode
-	pg.DSN = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s", pg.User, password, host, pg.Port, pg.Database, sslmode)
+	dsn := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(pg.User, password),
+		Host:   net.JoinHostPort(host, strconv.Itoa(pg.Port)),
+		Path:   "/" + pg.Database,
+	}
+	query := dsn.Query()
+	query.Set("sslmode", sslmode)
+	dsn.RawQuery = query.Encode()
+	pg.DSN = dsn.String()
 	cfg.Session.Store.Type = storeType
 	cfg.Session.Store.Postgres = pg
 	return nil

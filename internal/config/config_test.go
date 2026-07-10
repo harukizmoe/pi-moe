@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,37 @@ session:
 		t.Fatalf("store type = %q, want postgres", cfg.Session.Store.Type)
 	}
 	wantDSN := "postgres://pimoe:secret@localhost:5433/pimoe_test?sslmode=disable"
+	if cfg.Session.Store.Postgres.DSN != wantDSN {
+		t.Fatalf("postgres DSN = %q, want %q", cfg.Session.Store.Postgres.DSN, wantDSN)
+	}
+}
+
+func TestLoadAppEscapesEnvPostgresPasswordInDSN(t *testing.T) {
+	t.Setenv("PIMOE_POSTGRES_HOST", "db.internal")
+	t.Setenv("PIMOE_POSTGRES_PASSWORD", "sec@ret/with?chars#hash%")
+	path := writeConfigFile(t, `session:
+  store:
+    type: postgres
+    postgres:
+      user: pimoe
+      password_env: PIMOE_POSTGRES_PASSWORD
+      host_env: PIMOE_POSTGRES_HOST
+      port: 5432
+      database: pimoe
+      sslmode: disable
+`)
+
+	cfg, err := LoadApp(path)
+	if err != nil {
+		t.Fatalf("LoadApp() error = %v", err)
+	}
+	wantDSN := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("pimoe", "sec@ret/with?chars#hash%"),
+		Host:     "db.internal:5432",
+		Path:     "/pimoe",
+		RawQuery: "sslmode=disable",
+	}).String()
 	if cfg.Session.Store.Postgres.DSN != wantDSN {
 		t.Fatalf("postgres DSN = %q, want %q", cfg.Session.Store.Postgres.DSN, wantDSN)
 	}

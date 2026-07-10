@@ -59,10 +59,10 @@ postgres://<user>:<password>@<host>:<port>/<database>?sslmode=<sslmode>
 - password: `${PIMOE_POSTGRES_PASSWORD:-pimoe}`
 - published port: `5432:5432`
 - data volume: `pimoe-postgres-data`
-- init mount: `./migrations:/docker-entrypoint-initdb.d:ro`
+- init mount: `./migrations/0001_users_sessions.up.sql:/docker-entrypoint-initdb.d/0001_users_sessions.sql:ro`
 - healthcheck: `pg_isready -U pimoe -d pimoe`
 
-Docker 官方 initdb 机制只在数据目录首次初始化时执行 `docker-entrypoint-initdb.d`。当前项目只有初始 schema，满足本地开发。后续需要增量迁移时，再单独引入 migration runner。
+Docker 官方 initdb 机制只在数据目录首次初始化时执行 `docker-entrypoint-initdb.d`。这里只挂载 `up.sql`，避免同时执行同目录下的 `down.sql` 后删除 schema。当前项目只有初始 schema，满足本地开发。后续需要增量迁移时，再单独引入 migration runner。
 
 ## Server Runtime Behavior
 

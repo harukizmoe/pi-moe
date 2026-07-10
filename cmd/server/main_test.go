@@ -148,6 +148,42 @@ session:
 	}
 }
 
+func TestParseServerOptionsFileStoreOverrideDoesNotRequirePostgresEnv(t *testing.T) {
+	t.Setenv("PIMOE_POSTGRES_HOST", "")
+	t.Setenv("PIMOE_POSTGRES_PASSWORD", "")
+	path := writeServerAppConfig(t, `server:
+  addr: ":9090"
+session:
+  root: "state/sessions"
+  store:
+    type: postgres
+    postgres:
+      user: pimoe
+      password_env: PIMOE_POSTGRES_PASSWORD
+      host_env: PIMOE_POSTGRES_HOST
+      port: 5432
+      database: pimoe
+      sslmode: disable
+`)
+
+	got, err := parseServerOptions([]string{
+		"--app-config", path,
+		"--session-store", "file",
+	})
+	if err != nil {
+		t.Fatalf("parseServerOptions() error = %v", err)
+	}
+	if got.addr != ":9090" {
+		t.Fatalf("addr = %q, want app config value", got.addr)
+	}
+	if got.sessionRoot != "state/sessions" {
+		t.Fatalf("sessionRoot = %q, want app config value", got.sessionRoot)
+	}
+	if got.sessionStore != "file" {
+		t.Fatalf("sessionStore = %q, want flag override", got.sessionStore)
+	}
+}
+
 func TestParseServerOptionsValidatesSessionStore(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -101,7 +101,7 @@ func parseServerOptions(args []string) (serverOptions, error) {
 		return serverOptions{}, fmt.Errorf("parse flags: %w", err)
 	}
 	if strings.TrimSpace(opts.appConfigPath) != "" {
-		loaded, err := appconfig.LoadApp(opts.appConfigPath)
+		loaded, err := loadServerAppConfig(opts, flags)
 		if err != nil {
 			return serverOptions{}, err
 		}
@@ -129,6 +129,24 @@ func validateServerOptions(opts *serverOptions) error {
 	default:
 		return fmt.Errorf("unknown session store %q; want file or postgres", opts.sessionStore)
 	}
+}
+
+func loadServerAppConfig(opts serverOptions, flags *flag.FlagSet) (*appconfig.AppConfig, error) {
+	if appConfigPostgresEnvCanBeSkipped(opts, flags) {
+		return appconfig.LoadAppDefaults(opts.appConfigPath)
+	}
+	return appconfig.LoadApp(opts.appConfigPath)
+}
+
+func appConfigPostgresEnvCanBeSkipped(opts serverOptions, flags *flag.FlagSet) bool {
+	if flagWasSet(flags, "postgres-dsn") {
+		return true
+	}
+	return flagWasSet(flags, "session-store") && strings.EqualFold(strings.TrimSpace(opts.sessionStore), serverSessionStoreFile)
+}
+
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	return !flagWasNotSet(flags, name)
 }
 
 func applyAppConfigDefaults(opts *serverOptions, cfg *appconfig.AppConfig, flags *flag.FlagSet) {
