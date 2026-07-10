@@ -15,6 +15,7 @@ import (
 
 	approuter "harukizmoe/pimoe/internal/application/router"
 	appservice "harukizmoe/pimoe/internal/application/service"
+	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 	pgstore "harukizmoe/pimoe/internal/storage/postgres"
@@ -31,12 +32,13 @@ const (
 )
 
 type serverOptions struct {
-	addr         string
-	configPath   string
-	sessionRoot  string
-	providerName string
-	sessionStore string
-	postgresDSN  string
+	appConfigPath string
+	addr          string
+	configPath    string
+	sessionRoot   string
+	providerName  string
+	sessionStore  string
+	postgresDSN   string
 }
 
 func main() {
@@ -88,6 +90,7 @@ func parseServerOptions(args []string) (serverOptions, error) {
 	}
 	flags := flag.NewFlagSet("pimoe-server", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
+	flags.StringVar(&opts.appConfigPath, "app-config", "", "application runtime YAML config path")
 	flags.StringVar(&opts.addr, "addr", opts.addr, "HTTP listen address")
 	flags.StringVar(&opts.configPath, "config", opts.configPath, "providers YAML config path")
 	flags.StringVar(&opts.sessionRoot, "session-root", opts.sessionRoot, "managed session root")
@@ -96,6 +99,13 @@ func parseServerOptions(args []string) (serverOptions, error) {
 	flags.StringVar(&opts.postgresDSN, "postgres-dsn", "", "PostgreSQL DSN for --session-store postgres")
 	if err := flags.Parse(args); err != nil {
 		return serverOptions{}, fmt.Errorf("parse flags: %w", err)
+	}
+	if strings.TrimSpace(opts.appConfigPath) != "" {
+		loaded, err := appconfig.LoadApp(opts.appConfigPath)
+		if err != nil {
+			return serverOptions{}, err
+		}
+		applyAppConfigDefaults(&opts, loaded, flags)
 	}
 	if err := validateServerOptions(&opts); err != nil {
 		return serverOptions{}, err
@@ -119,6 +129,34 @@ func validateServerOptions(opts *serverOptions) error {
 	default:
 		return fmt.Errorf("unknown session store %q; want file or postgres", opts.sessionStore)
 	}
+}
+
+func applyAppConfigDefaults(opts *serverOptions, cfg *appconfig.AppConfig, flags *flag.FlagSet) {
+	if cfg == nil {
+		return
+	}
+	if flagWasNotSet(flags, "addr") && strings.TrimSpace(cfg.Server.Addr) != "" {
+		opts.addr = cfg.Server.Addr
+	}
+	if flagWasNotSet(flags, "session-root") && strings.TrimSpace(cfg.Session.Root) != "" {
+		opts.sessionRoot = cfg.Session.Root
+	}
+	if flagWasNotSet(flags, "session-store") && strings.TrimSpace(cfg.Session.Store.Type) != "" {
+		opts.sessionStore = cfg.Session.Store.Type
+	}
+	if flagWasNotSet(flags, "postgres-dsn") && strings.TrimSpace(cfg.Session.Store.Postgres.DSN) != "" {
+		opts.postgresDSN = cfg.Session.Store.Postgres.DSN
+	}
+}
+
+func flagWasNotSet(flags *flag.FlagSet, name string) bool {
+	seen := false
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == name {
+			seen = true
+		}
+	})
+	return !seen
 }
 
 func openServerSessionStore(ctx context.Context, opts serverOptions) (session.SessionStore, func() error, error) {

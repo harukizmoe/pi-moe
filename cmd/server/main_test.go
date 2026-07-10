@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -71,6 +73,81 @@ func TestParseServerOptionsAcceptsPostgresSessionStore(t *testing.T) {
 	}
 }
 
+func TestParseServerOptionsLoadsAppConfigDefaults(t *testing.T) {
+	t.Setenv("PIMOE_POSTGRES_HOST", "localhost")
+	t.Setenv("PIMOE_POSTGRES_PASSWORD", "secret")
+	path := writeServerAppConfig(t, `server:
+  addr: ":9090"
+session:
+  root: "state/sessions"
+  store:
+    type: postgres
+    postgres:
+      user: pimoe
+      password_env: PIMOE_POSTGRES_PASSWORD
+      host_env: PIMOE_POSTGRES_HOST
+      port: 5432
+      database: pimoe
+      sslmode: disable
+`)
+
+	got, err := parseServerOptions([]string{"--app-config", path})
+	if err != nil {
+		t.Fatalf("parseServerOptions() error = %v", err)
+	}
+	if got.addr != ":9090" {
+		t.Fatalf("addr = %q, want app config value", got.addr)
+	}
+	if got.sessionRoot != "state/sessions" {
+		t.Fatalf("sessionRoot = %q, want app config value", got.sessionRoot)
+	}
+	if got.sessionStore != "postgres" {
+		t.Fatalf("sessionStore = %q, want postgres", got.sessionStore)
+	}
+	wantDSN := "postgres://pimoe:secret@localhost:5432/pimoe?sslmode=disable"
+	if got.postgresDSN != wantDSN {
+		t.Fatalf("postgresDSN = %q, want %q", got.postgresDSN, wantDSN)
+	}
+}
+
+func TestParseServerOptionsFlagsOverrideAppConfig(t *testing.T) {
+	t.Setenv("PIMOE_POSTGRES_HOST", "localhost")
+	t.Setenv("PIMOE_POSTGRES_PASSWORD", "secret")
+	path := writeServerAppConfig(t, `server:
+  addr: ":9090"
+session:
+  root: "state/sessions"
+  store:
+    type: postgres
+    postgres:
+      user: pimoe
+      password_env: PIMOE_POSTGRES_PASSWORD
+      host_env: PIMOE_POSTGRES_HOST
+      port: 5432
+      database: pimoe
+      sslmode: disable
+`)
+
+	got, err := parseServerOptions([]string{
+		"--app-config", path,
+		"--addr", ":7070",
+		"--session-root", "override/sessions",
+		"--session-store", "file",
+	})
+	if err != nil {
+		t.Fatalf("parseServerOptions() error = %v", err)
+	}
+	if got.addr != ":7070" {
+		t.Fatalf("addr = %q, want flag override", got.addr)
+	}
+	if got.sessionRoot != "override/sessions" {
+		t.Fatalf("sessionRoot = %q, want flag override", got.sessionRoot)
+	}
+	if got.sessionStore != "file" {
+		t.Fatalf("sessionStore = %q, want flag override", got.sessionStore)
+	}
+}
+
 func TestParseServerOptionsValidatesSessionStore(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -98,6 +175,15 @@ func TestParseServerOptionsRejectsInvalidFlags(t *testing.T) {
 	if _, err := parseServerOptions([]string{"--unknown"}); err == nil {
 		t.Fatal("parseServerOptions() error = nil, want invalid flag error")
 	}
+}
+
+func writeServerAppConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "app.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write app config: %v", err)
+	}
+	return path
 }
 
 func serverOptionString(t *testing.T, opts serverOptions, name string) string {
