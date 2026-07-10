@@ -195,6 +195,8 @@ func TestLoadAppEscapesEnvPostgresPasswordInDSN(t *testing.T) {
 }
 
 func TestLoadAppRejectsMissingPostgresEnv(t *testing.T) {
+	t.Setenv("PIMOE_POSTGRES_HOST", "")
+	t.Setenv("PIMOE_POSTGRES_PASSWORD", "")
 	path := writeConfigFile(t, `session:
   store:
     type: postgres
