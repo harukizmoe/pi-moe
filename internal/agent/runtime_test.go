@@ -18,7 +18,7 @@ func TestRuntimeRunEmitsCompletedTerminal(t *testing.T) {
 	})
 	runtime := NewRuntime(provider, tools.NewRegistry(), "fake-model", Options{})
 
-	events := collectStreamEvents(t, runtime.Run(context.Background(), RunRequest{Messages: []Message{UserMessage{Content: "answer"}}}))
+	events := collectStreamEvents(t, runtime.Run(context.Background(), NewRunRequest([]Message{UserMessage{Content: "answer"}})))
 	if len(events) == 0 {
 		t.Fatal("events empty")
 	}
@@ -54,7 +54,7 @@ func TestRuntimeRunMapsProviderErrorToFailedTerminal(t *testing.T) {
 	})
 	runtime := NewRuntime(provider, tools.NewRegistry(), "fake-model", Options{})
 
-	events := collectStreamEvents(t, runtime.Run(context.Background(), RunRequest{Messages: []Message{UserMessage{Content: "answer"}}}))
+	events := collectStreamEvents(t, runtime.Run(context.Background(), NewRunRequest([]Message{UserMessage{Content: "answer"}})))
 	failed, ok := events[len(events)-1].(RunFailedEvent)
 	if !ok {
 		t.Fatalf("last event = %T, want RunFailedEvent", events[len(events)-1])
@@ -73,7 +73,7 @@ func TestRuntimeRunMapsCancellationToCanceledTerminal(t *testing.T) {
 	})
 	runtime := NewRuntime(provider, tools.NewRegistry(), "fake-model", Options{})
 
-	events := collectStreamEvents(t, runtime.Run(ctx, RunRequest{Messages: []Message{UserMessage{Content: "answer"}}}))
+	events := collectStreamEvents(t, runtime.Run(ctx, NewRunRequest([]Message{UserMessage{Content: "answer"}})))
 	canceled, ok := events[len(events)-1].(RunCanceledEvent)
 	if !ok {
 		t.Fatalf("last event = %T, want RunCanceledEvent", events[len(events)-1])
@@ -93,6 +93,7 @@ func TestRuntimeRunSnapshotsRequestMessages(t *testing.T) {
 	messages := []Message{UserMessage{Content: "original"}}
 	request := NewRunRequest(messages)
 	messages[0] = UserMessage{Content: "mutated after request"}
+	request.Messages()[0] = UserMessage{Content: "mutated snapshot copy"}
 
 	collectStreamEvents(t, runtime.Run(context.Background(), request))
 	if got != "original" {

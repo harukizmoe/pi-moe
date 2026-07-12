@@ -12,12 +12,17 @@ import (
 // Runtime copies Messages before execution; later caller mutations cannot
 // change the request being processed.
 type RunRequest struct {
-	Messages []Message
+	messages []Message
 }
 
 // NewRunRequest creates an immutable request snapshot from caller messages.
 func NewRunRequest(messages []Message) RunRequest {
-	return RunRequest{Messages: cloneMessages(messages)}
+	return RunRequest{messages: cloneMessages(messages)}
+}
+
+// Messages returns a defensive copy of the request input.
+func (r RunRequest) Messages() []Message {
+	return cloneMessages(r.messages)
 }
 
 // RunCompletedEvent is the exactly-once successful terminal event for a run.
@@ -65,43 +70,60 @@ func (r *Runtime) Run(ctx context.Context, request RunRequest) <-chan Event {
 	stream := make(chan Event, 64)
 	go func() {
 		defer close(stream)
-		underlying := r.agent.Stream(ctx, request.Messages)
+		underlying := r.agent.Stream(ctx, request.messages)
 		terminal := false
 		for event := range underlying {
 			switch event := event.(type) {
 			case RunEndEvent:
 				if !terminal {
-					stream <- RunCompletedEvent{RunID: event.RunID}
+					if !emitRuntimeEvent(ctx, stream, RunCompletedEvent{RunID: event.RunID}) {
+						return
+					}
 					terminal = true
 				}
 			case ErrorEvent:
 				if terminal {
 					continue
 				}
+				var terminalEvent Event
 				if isCancellationError(event.Error) || ctx.Err() != nil {
-					stream <- RunCanceledEvent{RunID: event.RunID, Error: cancellationError(event.Error, ctx)}
+					terminalEvent = RunCanceledEvent{RunID: event.RunID, Error: cancellationError(event.Error, ctx)}
 				} else {
-					stream <- RunFailedEvent{RunID: event.RunID, Error: event.Error}
+					terminalEvent = RunFailedEvent{RunID: event.RunID, Error: event.Error}
+				}
+				if !emitRuntimeEvent(ctx, stream, terminalEvent) {
+					return
 				}
 				terminal = true
 			default:
-				stream <- event
+				if !emitRuntimeEvent(ctx, stream, event) {
+					return
+				}
 			}
 		}
 		if terminal {
 			return
 		}
 		if err := ctx.Err(); err != nil {
-			stream <- RunCanceledEvent{Error: err}
+			emitRuntimeEvent(context.Background(), stream, RunCanceledEvent{Error: err})
 			return
 		}
-		stream <- RunFailedEvent{Error: errors.New("runtime ended without terminal event")}
+		emitRuntimeEvent(context.Background(), stream, RunFailedEvent{Error: errors.New("runtime ended without terminal event")})
 	}()
 	return stream
 }
 
+func emitRuntimeEvent(ctx context.Context, stream chan<- Event, event Event) bool {
+	select {
+	case stream <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func cloneRunRequest(request RunRequest) RunRequest {
-	return RunRequest{Messages: cloneMessages(request.Messages)}
+	return RunRequest{messages: cloneMessages(request.messages)}
 }
 
 func isCancellationError(err error) bool {
