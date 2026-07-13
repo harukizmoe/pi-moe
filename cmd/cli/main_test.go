@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"harukizmoe/pimoe/internal/agent"
+	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
@@ -307,12 +308,7 @@ func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T)
 	if err != nil {
 		t.Fatalf("readInput() first error = %v", err)
 	}
-	firstRunner, err := session.Open(context.Background(), session.Config{
-		ProviderConfigPath: firstOptions.configPath,
-		ProviderName:       firstOptions.providerName,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	}, firstOptions.sessionPath)
+	firstRunner, err := openCLITestSession(t, firstOptions.configPath, firstOptions.sessionPath)
 	if err != nil {
 		t.Fatalf("session.Open() first error = %v", err)
 	}
@@ -332,12 +328,7 @@ func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T)
 	if err != nil {
 		t.Fatalf("parseCLIOptions() second error = %v", err)
 	}
-	secondRunner, err := session.Open(context.Background(), session.Config{
-		ProviderConfigPath: secondOptions.configPath,
-		ProviderName:       secondOptions.providerName,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	}, secondOptions.sessionPath)
+	secondRunner, err := openCLITestSession(t, secondOptions.configPath, secondOptions.sessionPath)
 	if err != nil {
 		t.Fatalf("session.Open() second error = %v", err)
 	}
@@ -1043,11 +1034,7 @@ func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
       model: fake-tool-model
 `)
 
-	runner, err := session.New(context.Background(), session.Config{
-		ProviderConfigPath: providerConfigPath,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	})
+	runner, err := newCLITestSession(t, providerConfigPath)
 	if err != nil {
 		t.Fatalf("session.New() error = %v", err)
 	}
@@ -1077,11 +1064,7 @@ func TestRunInteractiveAcceptsPromptLongerThanScannerTokenLimit(t *testing.T) {
       model: fake-tool-model
 `)
 
-	runner, err := session.New(context.Background(), session.Config{
-		ProviderConfigPath: providerConfigPath,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	})
+	runner, err := newCLITestSession(t, providerConfigPath)
 	if err != nil {
 		t.Fatalf("session.New() error = %v", err)
 	}
@@ -1129,10 +1112,14 @@ func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T
 
 func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 	output, err := collectRunOutput(eventStream(
-		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
-		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
+		session.MessageEndEvent{Message: agent.AssistantMessage{ToolCalls: []llms.ToolCall{
+			{ID: "call-1", Type: "function", Function: llms.ToolCallFunction{Name: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`}},
+			{ID: "call-2", Type: "function", Function: llms.ToolCallFunction{Name: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`}},
+		}}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-1", Status: session.ToolResultSuccess, Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5", Status: agent.ToolResultSuccess}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-2", Status: session.ToolResultSuccess, Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20", Status: agent.ToolResultSuccess}},
 		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
 		session.RunEndEvent{RunID: "run-1"},
 	))
@@ -1161,8 +1148,11 @@ func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	toolErr := errors.New("upstream unavailable")
 	output, err := collectRunOutput(eventStream(
-		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
+		session.MessageEndEvent{Message: agent.AssistantMessage{ToolCalls: []llms.ToolCall{
+			{ID: "call-weather", Type: "function", Function: llms.ToolCallFunction{Name: "weather", Arguments: `{"city":"Tokyo"}`}},
+		}}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Status: session.ToolResultError, Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, Status: agent.ToolResultError, IsError: true}, Error: toolErr},
 		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
 		session.RunEndEvent{RunID: "run-1"},
 	))
@@ -1178,7 +1168,7 @@ func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	for _, want := range []string{
 		"tool=weather",
 		`arguments={"city":"Tokyo"}`,
-		"error=upstream unavailable",
+		`error=tool "weather" failed: upstream unavailable`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatRunOutput(trace error) missing %q in %q", want, got)
@@ -1318,4 +1308,30 @@ func collectUserPrompts(messages []agent.Message) []string {
 		}
 	}
 	return userPrompts
+}
+
+func openCLITestSession(t *testing.T, configPath, sessionPath string) (*session.Session, error) {
+	t.Helper()
+	runtime, err := agent.NewConfiguredRuntime(context.Background(), agent.Config{
+		ProviderConfigPath: configPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return session.OpenWithRuntime(runtime, sessionPath)
+}
+
+func newCLITestSession(t *testing.T, configPath string) (*session.Session, error) {
+	t.Helper()
+	runtime, err := agent.NewConfiguredRuntime(context.Background(), agent.Config{
+		ProviderConfigPath: configPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return session.NewWithRuntime(runtime)
 }

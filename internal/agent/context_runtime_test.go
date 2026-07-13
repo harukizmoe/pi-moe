@@ -137,6 +137,19 @@ func TestRuntimeContextCompactsAtMostOnceAfterPruning(t *testing.T) {
 	if strings.Contains(fmt.Sprintf("%#v", metadata), "abcde") {
 		t.Fatal("context metadata leaked summary content")
 	}
+	var candidate *ContextSummaryCandidateEvent
+	for i := range events {
+		if event, ok := events[i].(ContextSummaryCandidateEvent); ok {
+			candidate = &event
+			break
+		}
+	}
+	if candidate == nil {
+		t.Fatalf("events = %#v, want ContextSummaryCandidateEvent", events)
+	}
+	if candidate.RunID == "" || candidate.Candidate.Summary.ID != "summary-1" || candidate.Candidate.Summary.Content != "abcde" || candidate.Candidate.ReplacedMessages != 2 {
+		t.Fatalf("summary candidate = %#v, want complete compacted prefix", candidate)
+	}
 }
 
 func TestRuntimeContextFailsBeforeProviderWhenMandatoryContentExceedsBudget(t *testing.T) {
@@ -248,9 +261,10 @@ func TestRuntimeContextIsPreparedBeforeEveryProviderRound(t *testing.T) {
 		Estimator:     estimator,
 	}})
 
-	events := collectStreamEvents(t, runtime.Run(context.Background(), NewRunRequest([]Message{
+	request := NewRunRequestWithOptions([]Message{
 		UserMessage{Content: "use calculator to compute 13 * 7"},
-	})))
+	}, RunRequestOptions{AllowedTools: []AllowedTool{allowedCalculatorForTest(registry)}})
+	events := collectStreamEvents(t, runtime.Run(context.Background(), request))
 	preparedEvents := 0
 	for _, event := range events {
 		if _, ok := event.(ContextPreparedEvent); ok {
@@ -307,7 +321,8 @@ func TestRuntimeContextEstimatorCannotMutateProviderToolSchemas(t *testing.T) {
 		Estimator:     estimator,
 	}})
 
-	events := collectStreamEvents(t, runtime.Run(context.Background(), NewRunRequest([]Message{UserMessage{Content: "answer"}})))
+	request := NewRunRequestWithOptions([]Message{UserMessage{Content: "answer"}}, RunRequestOptions{AllowedTools: []AllowedTool{allowedCalculatorForTest(registry)}})
+	events := collectStreamEvents(t, runtime.Run(context.Background(), request))
 	if _, ok := events[len(events)-1].(RunCompletedEvent); !ok {
 		t.Fatalf("last event = %T, want RunCompletedEvent", events[len(events)-1])
 	}
@@ -316,7 +331,7 @@ func TestRuntimeContextEstimatorCannotMutateProviderToolSchemas(t *testing.T) {
 	if _, ok := properties["a"]; !ok {
 		t.Fatalf("provider schema = %#v, estimator deleted property a", parameters)
 	}
-	required := parameters["required"].([]string)
+	required := parameters["required"].([]any)
 	if required[0] == "mutated" {
 		t.Fatalf("provider schema = %#v, estimator mutated required slice", parameters)
 	}
@@ -359,4 +374,19 @@ func findContextPreparedEvent(t *testing.T, events []Event) ContextPreparedEvent
 	}
 	t.Fatalf("events = %#v, want ContextPreparedEvent", events)
 	return ContextPreparedEvent{}
+}
+
+func allowedCalculatorForTest(registry *tools.Registry) AllowedTool {
+	schema := registry.Schemas()[0]
+	return AllowedTool{
+		Name:        schema.Function.Name,
+		Version:     "test-v1",
+		Description: schema.Function.Description,
+		Parameters:  schema.Function.Parameters,
+		Policy:      ToolPolicy{Concurrency: ToolConcurrencyExclusive},
+		Executor: ToolExecutorFunc(func(ctx context.Context, request ToolExecutionRequest) (ToolExecutionResult, error) {
+			content, err := registry.Call(ctx, request.ToolName, request.Arguments)
+			return ToolExecutionResult{ModelContent: content}, err
+		}),
+	}
 }

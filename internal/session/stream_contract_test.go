@@ -77,7 +77,7 @@ func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
 		MessageDeltaEvent{},
 		MessageEndEvent{},
 		TurnEndEvent{},
-		RunEndEvent{},
+		RunCompletedEvent{},
 	)
 
 	turnStart := events[1].(TurnStartEvent)
@@ -95,8 +95,8 @@ func TestSessionPromptReturnsTypedToolCallingEvents(t *testing.T) {
 	if toolCall.ToolName != "calculator" {
 		t.Fatalf("ToolExecutionStartEvent.ToolName = %q, want calculator", toolCall.ToolName)
 	}
-	if toolCall.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolCall.Arguments)
+	if toolCall.ArgumentsDigest == "" {
+		t.Fatalf("ToolExecutionStartEvent leaked arguments or missing digest: %#v", toolCall)
 	}
 
 	toolResult := events[6].(ToolExecutionEndEvent)

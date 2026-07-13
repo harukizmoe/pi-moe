@@ -1,5 +1,7 @@
 package agent
 
+import "time"
+
 // Event 是 Agent 对外暴露的强类型运行事件。
 type Event interface {
 	// AgentEvent 限定事件只由本包定义，避免外部伪造不完整事件。
@@ -83,35 +85,80 @@ type MessageEndEvent struct {
 // AgentEvent 标记 MessageEndEvent 为 Agent 运行事件。
 func (MessageEndEvent) AgentEvent() {}
 
-// ToolExecutionStartEvent 表示本地工具开始执行。
+// ToolExecutionStartEvent 表示 Runtime 已开始治理一次模型 tool call。
 type ToolExecutionStartEvent struct {
 	// RunID 是本次运行内所有事件共享的稳定标识。
 	RunID string
 	// ToolCallID 是模型生成的 tool call 标识。
 	ToolCallID string
-	// ToolName 是被调用的本地工具名称。
+	// ToolName 是被调用的稳定工具名称。
 	ToolName string
-	// Arguments 是模型传入工具的原始 JSON 参数。
-	Arguments string
+	// ToolVersion 是 request-scoped AllowedTool 声明的版本；未知或未授权时为空。
+	ToolVersion string
+	// ArgumentsDigest 是原始参数的 SHA-256 digest。
+	ArgumentsDigest string
+	// StartedAt 是 UTC 调用开始时间。
+	StartedAt time.Time
 }
 
 // AgentEvent 标记 ToolExecutionStartEvent 为 Agent 运行事件。
 func (ToolExecutionStartEvent) AgentEvent() {}
 
-// ToolExecutionEndEvent 表示本地工具已返回结果。
+// ToolExecutionEndEvent 表示一次 tool call 已产生配对 ToolResultMessage。
 type ToolExecutionEndEvent struct {
 	// RunID 是本次运行内所有事件共享的稳定标识。
 	RunID string
 	// ToolCallID 是模型生成的 tool call 标识。
 	ToolCallID string
-	// Result 是可持久化到 transcript 的完整 tool result message。
+	// ToolName 是稳定工具名称。
+	ToolName string
+	// ToolVersion 是 AllowedTool 版本；未知工具时为空。
+	ToolVersion string
+	// Status 是调用的稳定终态。
+	Status ToolResultStatus
+	// Result 是可持久化到 transcript 的安全 tool result message。
 	Result ToolResultMessage
-	// Error 保存工具执行失败时的原始错误；成功时为空。
+	// ArgumentsDigest 和 OutputDigest 是输入、模型可见输出的 SHA-256 digest。
+	ArgumentsDigest string
+	OutputDigest    string
+	// InternalDigest 是 executor 内部细节或分类错误的 SHA-256 digest，不含原文。
+	InternalDigest string
+	// StartedAt 和 EndedAt 是 UTC 生命周期边界。
+	StartedAt time.Time
+	EndedAt   time.Time
+	// Error 仅保存稳定安全分类，不包含 executor 原始错误正文。
 	Error error
 }
 
 // AgentEvent 标记 ToolExecutionEndEvent 为 Agent 运行事件。
 func (ToolExecutionEndEvent) AgentEvent() {}
+
+// ToolApprovalRequestedEvent 表示 Runtime 在执行前请求 request-scoped 审批。
+type ToolApprovalRequestedEvent struct {
+	RunID           string
+	ToolCallID      string
+	ToolName        string
+	ToolVersion     string
+	ArgumentsDigest string
+	RequestedAt     time.Time
+}
+
+// AgentEvent 标记 ToolApprovalRequestedEvent 为 Agent 运行事件。
+func (ToolApprovalRequestedEvent) AgentEvent() {}
+
+// ToolApprovalDecidedEvent 表示 request-scoped 审批已完成。
+type ToolApprovalDecidedEvent struct {
+	RunID       string
+	ToolCallID  string
+	ToolName    string
+	ToolVersion string
+	Approved    bool
+	Decision    string
+	DecidedAt   time.Time
+}
+
+// AgentEvent 标记 ToolApprovalDecidedEvent 为 Agent 运行事件。
+func (ToolApprovalDecidedEvent) AgentEvent() {}
 
 // TurnEndEvent 表示当前用户 turn 已结束。
 type TurnEndEvent struct {

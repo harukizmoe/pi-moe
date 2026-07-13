@@ -113,8 +113,8 @@ func TestAgentStreamEmitsToolLifecycleAndContinuesWithToolResult(t *testing.T) {
 	if toolStart.ToolName != "calculator" {
 		t.Fatalf("ToolExecutionStartEvent.ToolName = %q", toolStart.ToolName)
 	}
-	if toolStart.Arguments != `{"a":13,"b":7,"op":"mul"}` {
-		t.Fatalf("ToolExecutionStartEvent.Arguments = %q", toolStart.Arguments)
+	if toolStart.ArgumentsDigest != digestString(`{"a":13,"b":7,"op":"mul"}`) {
+		t.Fatalf("ToolExecutionStartEvent leaked arguments or wrong digest: %#v", toolStart)
 	}
 
 	toolEnd := events[6].(ToolExecutionEndEvent)

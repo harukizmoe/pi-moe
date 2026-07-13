@@ -14,6 +14,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"harukizmoe/pimoe/internal/agent"
 	appconfig "harukizmoe/pimoe/internal/config"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
@@ -255,7 +256,7 @@ func newCLISessionWithRoot(ctx context.Context, opts cliOptions, appLogger logge
 }
 
 func newCLISessionWithStore(ctx context.Context, opts cliOptions, appLogger logger.Logger, store session.SessionStore, title string) (*session.Session, *cliManagedSession, error) {
-	cfg := session.Config{
+	cfg := agent.Config{
 		ProviderConfigPath: opts.configPath,
 		ProviderName:       opts.providerName,
 		BaseSystemPrompt:   "",
@@ -264,7 +265,11 @@ func newCLISessionWithStore(ctx context.Context, opts cliOptions, appLogger logg
 		MaxSteps:           opts.maxSteps,
 	}
 	if strings.TrimSpace(opts.sessionPath) != "" {
-		runner, err := session.Open(ctx, cfg, opts.sessionPath)
+		runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		runner, err := session.OpenWithRuntime(runtime, opts.sessionPath)
 		return runner, nil, err
 	}
 
@@ -280,14 +285,15 @@ func newCLISessionWithStore(ctx context.Context, opts cliOptions, appLogger logg
 		cfg.ProviderName = createCfg.ProviderName
 		cfg.SessionPrompt = createCfg.SessionPrompt
 		cfg.MaxSteps = createCfg.MaxSteps
-		if _, err := session.New(ctx, cfg); err != nil {
+		runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+		if err != nil {
 			return nil, nil, err
 		}
 		meta, err := store.Create(ctx, actor, title, createCfg)
 		if err != nil {
 			return nil, nil, err
 		}
-		runner, err := session.Open(ctx, cfg, meta.Path)
+		runner, err := session.OpenWithRuntime(runtime, meta.Path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -317,14 +323,22 @@ func newCLISessionWithStore(ctx context.Context, opts cliOptions, appLogger logg
 		} else {
 			cfg.SessionPrompt = meta.Config.SessionPrompt
 		}
-		runner, err := session.Open(ctx, cfg, meta.Path)
+		runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		runner, err := session.OpenWithRuntime(runtime, meta.Path)
 		if err != nil {
 			return nil, nil, err
 		}
 		return runner, &cliManagedSession{store: store, ID: meta.ID, providerOverride: opts.providerName, maxStepsOverride: opts.maxSteps, sessionPromptOverride: opts.sessionPrompt}, nil
 	}
 
-	runner, err := session.New(ctx, cfg)
+	runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	runner, err := session.NewWithRuntime(runtime)
 	return runner, nil, err
 }
 
@@ -451,6 +465,7 @@ type toolStep struct {
 func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 	var output runOutput
 	stepByCallID := make(map[string]int)
+	argumentsByCallID := make(map[string]string)
 
 	for event := range events {
 		switch event := event.(type) {
@@ -459,7 +474,7 @@ func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 			output.Steps = append(output.Steps, toolStep{
 				ToolCallID: event.ToolCallID,
 				ToolName:   event.ToolName,
-				Arguments:  event.Arguments,
+				Arguments:  argumentsByCallID[event.ToolCallID],
 			})
 		case session.ToolExecutionEndEvent:
 			stepIndex, ok := stepByCallID[event.ToolCallID]
@@ -468,16 +483,25 @@ func collectRunOutput(events <-chan session.Event) (runOutput, error) {
 				stepByCallID[event.ToolCallID] = stepIndex
 				output.Steps = append(output.Steps, toolStep{ToolCallID: event.ToolCallID, ToolName: event.Result.ToolName})
 			}
-			if event.Error != nil {
-				output.Steps[stepIndex].Error = event.Error.Error()
-			} else if event.Result.IsError {
-				output.Steps[stepIndex].Error = event.Result.Content
-			} else {
+			if event.Status == session.ToolResultSuccess {
 				output.Steps[stepIndex].Result = event.Result.Content
+			} else {
+				output.Steps[stepIndex].Error = event.Result.Content
 			}
 		case session.MessageEndEvent:
+			for _, call := range event.Message.ToolCalls {
+				argumentsByCallID[call.ID] = call.Function.Arguments
+			}
 			if len(event.Message.ToolCalls) == 0 {
 				output.Answer = event.Message.Content
+			}
+		case session.RunFailedEvent:
+			if event.Error != nil {
+				return output, event.Error
+			}
+		case session.RunCanceledEvent:
+			if event.Error != nil {
+				return output, event.Error
 			}
 		case session.ErrorEvent:
 			if event.Error != nil {

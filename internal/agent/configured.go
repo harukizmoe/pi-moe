@@ -28,11 +28,11 @@ type Config struct {
 	SessionPrompt string
 }
 
-// NewConfigured 从配置文件组装 Provider、工具注册表和 Agent。
-func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
+// NewConfiguredRuntime 从配置文件一次性组装 Provider、工具 capability 和 Runtime。
+func NewConfiguredRuntime(ctx context.Context, cfg Config) (*Runtime, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("create agent: %w", err)
+			return nil, fmt.Errorf("create runtime: %w", err)
 		}
 	}
 
@@ -40,7 +40,6 @@ func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
 	if path == "" {
 		path = defaultProviderConfigPath
 	}
-
 	loaded, err := appconfig.Load(path)
 	if err != nil {
 		return nil, err
@@ -58,7 +57,6 @@ func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
 	llmRegistry := llms.NewRegistry()
 	llmRegistry.Register("fake", llms.NewFakeProvider)
 	llmRegistry.Register("openai_compatible", llms.NewOpenAICompatibleProvider)
-
 	provider, err := llmRegistry.NewProvider(providerConfig)
 	if err != nil {
 		return nil, err
@@ -66,8 +64,7 @@ func NewConfigured(ctx context.Context, cfg Config) (*Agent, error) {
 
 	toolRegistry := tools.NewRegistry()
 	toolRegistry.Register(tools.Calculator{})
-
-	return NewWithOptions(provider, toolRegistry, providerConfig.Model, Options{
+	return NewRuntime(provider, toolRegistry, providerConfig.Model, Options{
 		Logger:           cfg.Logger,
 		MaxSteps:         cfg.MaxSteps,
 		BaseSystemPrompt: cfg.BaseSystemPrompt,

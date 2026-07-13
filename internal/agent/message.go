@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -39,6 +38,8 @@ type ToolResultMessage struct {
 	ToolName string
 	// Content 是发送给模型的工具结果文本；失败时必须是安全错误摘要。
 	Content string
+	// Status 是 tool call 的稳定终态；空值仅用于兼容旧 transcript，等同于 success。
+	Status ToolResultStatus
 	// IsError 标记该工具结果是否表示执行失败。
 	IsError bool
 }
@@ -146,9 +147,6 @@ func toLLMMessage(message Message) (llms.Message, error) {
 			if strings.TrimSpace(call.Function.Name) == "" {
 				return llms.Message{}, fmt.Errorf("assistant tool call must have function name")
 			}
-			if err := validateToolCallArguments(call.Function.Arguments); err != nil {
-				return llms.Message{}, err
-			}
 		}
 		return llms.Message{Role: llms.RoleAssistant, Content: msg.Content, ToolCalls: toolCalls}, nil
 	case ToolResultMessage:
@@ -162,12 +160,4 @@ func toLLMMessage(message Message) (llms.Message, error) {
 	default:
 		return llms.Message{}, fmt.Errorf("unsupported agent message type %T", message)
 	}
-}
-
-func validateToolCallArguments(arguments string) error {
-	trimmed := strings.TrimSpace(arguments)
-	if trimmed == "" || !json.Valid([]byte(trimmed)) {
-		return fmt.Errorf("assistant tool call arguments must be valid JSON")
-	}
-	return nil
 }

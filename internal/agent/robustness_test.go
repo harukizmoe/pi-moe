@@ -84,38 +84,46 @@ func TestAgentStreamRejectsProviderDoneWithNonAssistantRole(t *testing.T) {
 	}
 }
 
-func TestAgentStreamRejectsMalformedToolCallArgumentsBeforeExecution(t *testing.T) {
+func TestAgentStreamPairsMalformedToolCallWithSafeErrorResult(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 	badCall := calculatorToolCall("call_bad_json", `{"a":1`)
 	provider := &recordingProvider{inner: streamFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
-		return streamEvents(
-			assistantToolCallDelta(0, badCall),
-			assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{badCall}}),
-		), nil
+		switch len(req.Messages) {
+		case 1:
+			return streamEvents(
+				assistantToolCallDelta(0, badCall),
+				assistantDone(llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{badCall}}),
+			), nil
+		case 3:
+			if result := req.Messages[2]; result.Role != llms.RoleTool || result.ToolCallID != badCall.ID || result.Content != `tool "calculator" received invalid arguments` {
+				t.Fatalf("paired malformed result = %#v", result)
+			}
+			return streamEvents(assistantTextDelta("arguments rejected"), assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "arguments rejected"})), nil
+		default:
+			t.Fatalf("unexpected provider request messages len = %d", len(req.Messages))
+			return nil, nil
+		}
 	})}
 
 	a := New(provider, registry, "fake-model")
 	events := collectStreamEvents(t, a.Stream(context.Background(), []Message{UserMessage{Content: "call calculator"}}))
 
-	if len(provider.requests) != 1 {
-		t.Fatalf("provider requests len = %d, want one failed boundary validation round", len(provider.requests))
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests len = %d, want malformed result follow-up", len(provider.requests))
 	}
-	var errEvent *ErrorEvent
+	var toolEnd *ToolExecutionEndEvent
 	for _, event := range events {
-		switch event := event.(type) {
-		case ToolExecutionStartEvent:
-			t.Fatalf("unexpected ToolExecutionStartEvent for malformed arguments: %#v", event)
-		case ErrorEvent:
+		if event, ok := event.(ToolExecutionEndEvent); ok {
 			copy := event
-			errEvent = &copy
+			toolEnd = &copy
 		}
 	}
-	if errEvent == nil {
-		t.Fatalf("events = %#v, want ErrorEvent", events)
+	if toolEnd == nil || toolEnd.Status != ToolResultError || toolEnd.Result.Status != ToolResultError {
+		t.Fatalf("tool end = %#v, want structured argument error", toolEnd)
 	}
-	if !strings.Contains(errEvent.Error.Error(), "tool call arguments") {
-		t.Fatalf("stream error = %q, want tool call argument validation", errEvent.Error.Error())
+	if _, ok := events[len(events)-1].(RunEndEvent); !ok {
+		t.Fatalf("last event = %T, want successful RunEndEvent", events[len(events)-1])
 	}
 }
 
@@ -162,8 +170,8 @@ func TestToolErrorContentIsSafeWhileEventKeepsInternalError(t *testing.T) {
 	if toolEnd == nil {
 		t.Fatalf("events = %#v, want ToolExecutionEndEvent", events)
 	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "divide by zero") {
-		t.Fatalf("tool end error = %v, want internal divide-by-zero error", toolEnd.Error)
+	if toolEnd.Error == nil || toolEnd.Error.Error() != "tool execution failed" || toolEnd.InternalDigest == digestString("") {
+		t.Fatalf("tool end classification/digest = %#v", toolEnd)
 	}
 	if toolEnd.Result.Content != `tool "calculator" failed` {
 		t.Fatalf("tool result content = %q, want safe summary", toolEnd.Result.Content)

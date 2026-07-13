@@ -13,11 +13,17 @@ import (
 // 已经开始执行的请求，或让 Provider 观察到创建快照之后的意外变更。
 type RunRequest struct {
 	messages []Message
+	options  RunRequestOptions
 }
 
 // NewRunRequest 从调用方消息创建不可变快照；后续修改原切片不会影响请求。
 func NewRunRequest(messages []Message) RunRequest {
-	return RunRequest{messages: cloneMessages(messages)}
+	return RunRequest{messages: cloneMessages(messages), options: RunRequestOptions{}}
+}
+
+// NewRunRequestWithOptions 创建隔离输入和 request-scoped 工具能力的运行请求。
+func NewRunRequestWithOptions(messages []Message, options RunRequestOptions) RunRequest {
+	return RunRequest{messages: cloneMessages(messages), options: cloneRunRequestOptions(options)}
 }
 
 // Messages 返回请求消息的防御性副本，调用方修改返回值不会改变内部快照。
@@ -56,15 +62,28 @@ type RunCanceledEvent struct {
 // AgentEvent 将 RunCanceledEvent 标记为 Agent 事件。
 func (RunCanceledEvent) AgentEvent() {}
 
-// Runtime 执行 request-scoped Agent Run，并把内部循环转换为稳定 typed event stream。
+// Runtime 执行 request-scoped Agent Run，并保存由装配层注入的默认 capability 快照。
 type Runtime struct {
-	agent *Agent
+	agent          *Agent
+	defaultOptions RunRequestOptions
 }
 
 // NewRuntime 使用固定 Provider、模型和运行策略创建 Runtime；单次输入仍由 RunRequest 提供，
 // Runtime 不读取 Session、数据库或全局可变状态。
 func NewRuntime(provider llms.Provider, registry *tools.Registry, model string, opts Options) *Runtime {
-	return &Runtime{agent: NewWithOptions(provider, registry, model, opts)}
+	allowed, _ := legacyAllowedTools(registry)
+	return &Runtime{
+		agent:          NewWithOptions(provider, registry, model, opts),
+		defaultOptions: cloneRunRequestOptions(RunRequestOptions{AllowedTools: allowed}),
+	}
+}
+
+// NewRuntimeWithOptions 创建带 request-scoped 默认能力的 Runtime。
+func NewRuntimeWithOptions(provider llms.Provider, model string, opts Options, defaults RunRequestOptions) *Runtime {
+	return &Runtime{
+		agent:          NewWithOptions(provider, nil, model, opts),
+		defaultOptions: cloneRunRequestOptions(defaults),
+	}
 }
 
 // Run 执行一个不可变请求快照，并向返回流写入恰好一个终态事件。
@@ -74,18 +93,45 @@ func (r *Runtime) Run(ctx context.Context, request RunRequest) <-chan Event {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// 在启动 goroutine 前再次复制，关闭调用 Run 后立刻修改请求数据的竞态窗口。
+	// 在启动 goroutine 前再次复制，并逐字段补齐默认 capability；显式 request 能力不能被其它默认值覆盖。
 	request = cloneRunRequest(request)
+	request.options = mergeRunRequestOptions(r.defaultOptions, request.options)
 	stream := make(chan Event, 64)
 	go func() {
 		defer close(stream)
 		// Runtime 只适配 Agent 的终态；其余过程事件保持原始顺序转发。
-		underlying := r.agent.Stream(ctx, request.messages)
+		underlying := r.agent.streamWithGovernedTools(ctx, request.messages, request.options)
 		terminal := false
+		extractionMessages := request.Messages()
 		for event := range underlying {
+			switch observed := event.(type) {
+			case MessageEndEvent:
+				extractionMessages = append(extractionMessages, cloneMessages([]Message{observed.Message})[0])
+			case ToolExecutionEndEvent:
+				extractionMessages = append(extractionMessages, observed.Result)
+			}
 			switch event := event.(type) {
 			case RunEndEvent:
 				if !terminal {
+					if request.options.MemoryExtractor != nil {
+						candidates, extractErr := request.options.MemoryExtractor.Extract(ctx, MemoryExtractionInput{
+							Messages:    cloneMessages(extractionMessages),
+							MemoryItems: append([]MemoryItem(nil), request.options.MemoryItems...),
+						})
+						if extractErr != nil {
+							if !emitRuntimeEvent(ctx, stream, MemoryExtractionFailedEvent{RunID: event.RunID, Error: extractErr}) {
+								return
+							}
+						} else if validateErr := validateMemoryCandidates(candidates); validateErr != nil {
+							if !emitRuntimeEvent(ctx, stream, MemoryExtractionFailedEvent{RunID: event.RunID, Error: validateErr}) {
+								return
+							}
+						} else if len(candidates) > 0 {
+							if !emitRuntimeEvent(ctx, stream, MemoryCandidateEvent{RunID: event.RunID, Candidates: cloneMemoryCandidates(candidates)}) {
+								return
+							}
+						}
+					}
 					if !emitRuntimeEvent(ctx, stream, RunCompletedEvent{RunID: event.RunID}) {
 						return
 					}
@@ -144,7 +190,29 @@ func emitRuntimeEvent(ctx context.Context, stream chan<- Event, event Event) boo
 }
 
 func cloneRunRequest(request RunRequest) RunRequest {
-	return RunRequest{messages: cloneMessages(request.messages)}
+	return RunRequest{messages: cloneMessages(request.messages), options: cloneRunRequestOptions(request.options)}
+}
+
+func cloneRunRequestOptions(options RunRequestOptions) RunRequestOptions {
+	cloned := RunRequestOptions{
+		KnownToolNames:  append([]string(nil), options.KnownToolNames...),
+		ApprovalGate:    options.ApprovalGate,
+		MemoryItems:     append([]MemoryItem(nil), options.MemoryItems...),
+		ContextSummary:  cloneContextSummary(options.ContextSummary),
+		MemoryExtractor: options.MemoryExtractor,
+	}
+	if options.AllowedTools != nil {
+		cloned.AllowedTools = make([]AllowedTool, 0, len(options.AllowedTools))
+		for _, tool := range options.AllowedTools {
+			copy, err := cloneAllowedTool(tool)
+			if err != nil {
+				// 保留无效输入，由 Run stream 输出确定性的 request validation 终态。
+				copy = tool
+			}
+			cloned.AllowedTools = append(cloned.AllowedTools, copy)
+		}
+	}
+	return cloned
 }
 
 func isCancellationError(err error) bool {
@@ -159,4 +227,31 @@ func cancellationError(err error, ctx context.Context) error {
 		return ctxErr
 	}
 	return context.Canceled
+}
+
+func cloneMemoryCandidates(candidates []MemoryCandidate) []MemoryCandidate {
+	return append([]MemoryCandidate(nil), candidates...)
+}
+
+func mergeRunRequestOptions(defaults, request RunRequestOptions) RunRequestOptions {
+	merged := cloneRunRequestOptions(request)
+	if merged.AllowedTools == nil {
+		merged.AllowedTools = cloneRunRequestOptions(defaults).AllowedTools
+	}
+	if merged.KnownToolNames == nil {
+		merged.KnownToolNames = append([]string(nil), defaults.KnownToolNames...)
+	}
+	if merged.ApprovalGate == nil {
+		merged.ApprovalGate = defaults.ApprovalGate
+	}
+	if merged.MemoryItems == nil {
+		merged.MemoryItems = append([]MemoryItem(nil), defaults.MemoryItems...)
+	}
+	if merged.ContextSummary == nil {
+		merged.ContextSummary = cloneContextSummary(defaults.ContextSummary)
+	}
+	if merged.MemoryExtractor == nil {
+		merged.MemoryExtractor = defaults.MemoryExtractor
+	}
+	return merged
 }

@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,7 +149,7 @@ func TestSessionPromptPersistsOnlyTerminalMessages(t *testing.T) {
 		MessageDeltaEvent{},
 		MessageEndEvent{},
 		TurnEndEvent{},
-		RunEndEvent{},
+		RunCompletedEvent{},
 	)
 
 	messages := s.Messages()
@@ -271,7 +273,7 @@ func TestSessionOpenDoesNotDurablyPersistCanceledPrompt(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	provider := newBlockingProvider()
-	s.agent = agent.New(provider, tools.NewRegistry(), "blocking-model")
+	s.runtime = agent.NewRuntime(provider, tools.NewRegistry(), "blocking-model", agent.Options{})
 
 	stream := s.Prompt(context.Background(), "prompt that will be canceled")
 	eventsDone := make(chan []Event, 1)
@@ -341,7 +343,7 @@ func TestSessionPromptRejectsEmptyInputWithoutTranscriptMutation(t *testing.T) {
 
 func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testing.T) {
 	provider := newBlockingProvider()
-	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model")}
+	s := &Session{runtime: agent.NewRuntime(provider, tools.NewRegistry(), "blocking-model", agent.Options{})}
 
 	first := s.Prompt(context.Background(), "first prompt")
 	firstDone := make(chan []Event, 1)
@@ -384,7 +386,7 @@ func TestSessionPromptRejectsConcurrentPromptWithoutTranscriptMutation(t *testin
 
 func TestSessionCancelEmitsTerminalErrorEvent(t *testing.T) {
 	provider := newBlockingProvider()
-	s := &Session{agent: agent.New(provider, tools.NewRegistry(), "blocking-model")}
+	s := &Session{runtime: agent.NewRuntime(provider, tools.NewRegistry(), "blocking-model", agent.Options{})}
 
 	stream := s.Prompt(context.Background(), "first prompt")
 	eventsDone := make(chan []Event, 1)
@@ -403,20 +405,20 @@ func TestSessionCancelEmitsTerminalErrorEvent(t *testing.T) {
 	}
 
 	if len(events) == 0 {
-		t.Fatal("events len = 0, want terminal ErrorEvent")
+		t.Fatal("events len = 0, want terminal RunCanceledEvent")
 	}
 
-	errEvent, ok := events[len(events)-1].(ErrorEvent)
+	canceled, ok := events[len(events)-1].(RunCanceledEvent)
 	if !ok {
-		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+		t.Fatalf("last event = %T, want RunCanceledEvent", events[len(events)-1])
 	}
-	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), context.Canceled.Error()) {
-		t.Fatalf("last ErrorEvent.Error = %v, want context cancellation", errEvent.Error)
+	if canceled.Error == nil || !strings.Contains(canceled.Error.Error(), context.Canceled.Error()) {
+		t.Fatalf("RunCanceledEvent.Error = %v, want context cancellation", canceled.Error)
 	}
 
 	for i, event := range events {
-		if _, ok := event.(RunEndEvent); ok {
-			t.Fatalf("event[%d] = %T, want cancellation stream without RunEndEvent", i, event)
+		if _, ok := event.(RunCompletedEvent); ok {
+			t.Fatalf("event[%d] = %T, want cancellation stream without RunCompletedEvent", i, event)
 		}
 	}
 }
@@ -425,15 +427,15 @@ func TestSessionPromptDoesNotPersistOverLimitToolCallMessage(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.Calculator{})
 	provider := &maxStepLoopProvider{t: t}
-	s := &Session{agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1})}
+	s := &Session{runtime: agent.NewRuntime(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1})}
 
 	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "compute (2 + 3) * 4"))
-	errEvent, ok := events[len(events)-1].(ErrorEvent)
+	failed, ok := events[len(events)-1].(RunFailedEvent)
 	if !ok {
-		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+		t.Fatalf("last event = %T, want RunFailedEvent", events[len(events)-1])
 	}
-	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "max steps") {
-		t.Fatalf("ErrorEvent.Error = %v, want max steps", errEvent.Error)
+	if failed.Error == nil || !strings.Contains(failed.Error.Error(), "max steps") {
+		t.Fatalf("RunFailedEvent.Error = %v, want max steps", failed.Error)
 	}
 
 	messages := s.Messages()
@@ -448,13 +450,13 @@ func TestSessionPromptDoesNotDurablyPersistFailedRunWithoutRunEnd(t *testing.T) 
 	provider := &maxStepLoopProvider{t: t}
 	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
 	s := &Session{
-		agent: agent.NewWithOptions(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1}),
-		store: newFileStore(sessionPath),
+		runtime: agent.NewRuntime(provider, registry, "fake-tool-model", agent.Options{MaxSteps: 1}),
+		store:   newFileStore(sessionPath),
 	}
 
 	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "compute (2 + 3) * 4"))
-	if _, ok := events[len(events)-1].(ErrorEvent); !ok {
-		t.Fatalf("last event = %T, want ErrorEvent", events[len(events)-1])
+	if _, ok := events[len(events)-1].(RunFailedEvent); !ok {
+		t.Fatalf("last event = %T, want RunFailedEvent", events[len(events)-1])
 	}
 
 	reopenedMessages, err := LoadMessages(sessionPath)
@@ -464,6 +466,306 @@ func TestSessionPromptDoesNotDurablyPersistFailedRunWithoutRunEnd(t *testing.T) 
 	if len(reopenedMessages) != 0 {
 		t.Fatalf("LoadMessages() len after failed run = %d, want 0: %#v", len(reopenedMessages), reopenedMessages)
 	}
+}
+
+func TestSessionCommitsMemoryCandidatesOnlyAfterCompletedRun(t *testing.T) {
+	provider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "done"}), nil
+	})
+	extractor := sessionMemoryExtractorFunc(func(context.Context, agent.MemoryExtractionInput) ([]agent.MemoryCandidate, error) {
+		return []agent.MemoryCandidate{{Operation: agent.MemoryOperationUpsert, Key: "profile/name", Content: "Ada", Source: "run-output", Scope: "user:test", Provenance: "explicit user statement"}}, nil
+	})
+	runtime := agent.NewRuntimeWithOptions(provider, "fake-model", agent.Options{}, agent.RunRequestOptions{MemoryExtractor: extractor})
+	s, err := NewWithRuntime(runtime)
+	if err != nil {
+		t.Fatalf("NewWithRuntime() error = %v", err)
+	}
+
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "remember my name"))
+	for _, event := range events {
+		if _, ok := event.(MemoryCandidateEvent); ok {
+			t.Fatalf("uncommitted candidate leaked through Session stream: %#v", events)
+		}
+	}
+	candidates := s.MemoryCandidates()
+	if len(candidates) != 1 || candidates[0].Key != "profile/name" {
+		t.Fatalf("MemoryCandidates() = %#v, want committed candidate", candidates)
+	}
+	candidates[0].Key = "mutated"
+	if got := s.MemoryCandidates()[0].Key; got != "profile/name" {
+		t.Fatalf("MemoryCandidates() retained caller mutation %q", got)
+	}
+}
+
+func TestSessionDoesNotCommitMemoryCandidatesFromFailedOrCanceledRuns(t *testing.T) {
+	for _, mode := range []string{"failed", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			extractorCalled := false
+			extractor := sessionMemoryExtractorFunc(func(context.Context, agent.MemoryExtractionInput) ([]agent.MemoryCandidate, error) {
+				extractorCalled = true
+				return []agent.MemoryCandidate{{Operation: agent.MemoryOperationUpsert, Key: "profile/name", Content: "Ada", Source: "run-output", Scope: "user:test", Provenance: "explicit user statement"}}, nil
+			})
+			started := make(chan struct{})
+			provider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+				if mode == "failed" {
+					return nil, errors.New("provider failed")
+				}
+				close(started)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			runtime := agent.NewRuntimeWithOptions(provider, "fake-model", agent.Options{}, agent.RunRequestOptions{MemoryExtractor: extractor})
+			s, err := NewWithRuntime(runtime)
+			if err != nil {
+				t.Fatalf("NewWithRuntime() error = %v", err)
+			}
+
+			var events []Event
+			if mode == "failed" {
+				events = collectSessionStreamEvents(t, s.Prompt(context.Background(), "remember my name"))
+			} else {
+				eventsDone := make(chan []Event, 1)
+				go func() {
+					eventsDone <- collectSessionStreamEvents(t, s.Prompt(context.Background(), "remember my name"))
+				}()
+				<-started
+				s.Cancel()
+				select {
+				case events = <-eventsDone:
+				case <-time.After(200 * time.Millisecond):
+					t.Fatal("canceled memory run did not terminate")
+				}
+			}
+			if len(events) == 0 {
+				t.Fatal("events len = 0, want terminal event")
+			}
+			if mode == "failed" {
+				if _, ok := events[len(events)-1].(RunFailedEvent); !ok {
+					t.Fatalf("last event = %T, want RunFailedEvent", events[len(events)-1])
+				}
+			} else if _, ok := events[len(events)-1].(RunCanceledEvent); !ok {
+				t.Fatalf("last event = %T, want RunCanceledEvent", events[len(events)-1])
+			}
+			if extractorCalled {
+				t.Fatal("memory extractor called before a completed Run")
+			}
+			if candidates := s.MemoryCandidates(); len(candidates) != 0 {
+				t.Fatalf("MemoryCandidates() after %s Run = %#v, want none", mode, candidates)
+			}
+		})
+	}
+}
+
+func TestSessionRejectsPendingMemoryCandidatesWhenTranscriptCommitFails(t *testing.T) {
+	provider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "done"}), nil
+	})
+	extractor := sessionMemoryExtractorFunc(func(context.Context, agent.MemoryExtractionInput) ([]agent.MemoryCandidate, error) {
+		return []agent.MemoryCandidate{{Operation: agent.MemoryOperationUpsert, Key: "profile/name", Content: "Ada", Source: "run-output", Scope: "user:test", Provenance: "explicit user statement"}}, nil
+	})
+	s := &Session{
+		runtime: agent.NewRuntimeWithOptions(provider, "fake-model", agent.Options{}, agent.RunRequestOptions{MemoryExtractor: extractor}),
+		store:   newFileStore(t.TempDir()),
+	}
+
+	events := collectSessionStreamEvents(t, s.Prompt(context.Background(), "remember my name"))
+	if _, ok := events[len(events)-1].(RunFailedEvent); !ok {
+		t.Fatalf("last event = %T, want Session commit RunFailedEvent", events[len(events)-1])
+	}
+	if candidates := s.MemoryCandidates(); len(candidates) != 0 {
+		t.Fatalf("MemoryCandidates() after failed Session commit = %#v, want none", candidates)
+	}
+	if messages := s.Messages(); len(messages) != 0 {
+		t.Fatalf("Messages() after failed Session commit = %#v, want rollback", messages)
+	}
+}
+
+func TestSessionPersistsAcceptedContextSummaryAndReusesItAfterReopen(t *testing.T) {
+	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+	providerCalls := 0
+	provider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		providerCalls++
+		return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: fmt.Sprintf("answer-%d", providerCalls)}), nil
+	})
+	compactCalls := 0
+	compactor := sessionCompactorFunc(func(ctx context.Context, input agent.ContextCompactionInput) (agent.ContextSummary, error) {
+		compactCalls++
+		if input.ExistingSummary != nil || len(input.Messages) != 2 {
+			t.Fatalf("compaction input = %#v, want first completed turn without an existing summary", input)
+		}
+		return agent.ContextSummary{ID: "summary-1", Content: "first turn summary"}, nil
+	})
+	runtime := agent.NewRuntime(provider, tools.NewRegistry(), "fake-model", agent.Options{Context: agent.ContextOptions{
+		ContextWindow: 25,
+		Estimator:     sessionFixedMessageEstimator{},
+		Compactor:     compactor,
+	}})
+	s, err := OpenWithRuntime(runtime, sessionPath)
+	if err != nil {
+		t.Fatalf("OpenWithRuntime() error = %v", err)
+	}
+	collectSessionStreamEvents(t, s.Prompt(context.Background(), "first question"))
+	secondEvents := collectSessionStreamEvents(t, s.Prompt(context.Background(), "second question"))
+	if compactCalls != 1 {
+		t.Fatalf("compactor calls = %d, want 1", compactCalls)
+	}
+	for _, event := range secondEvents {
+		if _, ok := event.(ContextSummaryCandidateEvent); ok {
+			t.Fatalf("uncommitted summary candidate leaked through Session stream: %#v", secondEvents)
+		}
+	}
+
+	state, err := loadSessionState(sessionPath)
+	if err != nil {
+		t.Fatalf("loadSessionState() error = %v", err)
+	}
+	if state.contextSummary == nil || state.contextSummary.ID != "summary-1" || state.contextSummary.Content != "first turn summary" || state.summarizedMessages != 2 {
+		t.Fatalf("persisted context state = %#v, want accepted first-turn summary", state)
+	}
+	if len(state.messages) != 4 {
+		t.Fatalf("persisted transcript len = %d, want full four-message history", len(state.messages))
+	}
+
+	var reopenedRequest llms.ChatRequest
+	reopenedProvider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+		reopenedRequest = req
+		return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "answer-3"}), nil
+	})
+	reopenedRuntime := agent.NewRuntime(reopenedProvider, tools.NewRegistry(), "fake-model", agent.Options{Context: agent.ContextOptions{
+		ContextWindow: 45,
+		Estimator:     sessionFixedMessageEstimator{},
+	}})
+	reopened, err := OpenWithRuntime(reopenedRuntime, sessionPath)
+	if err != nil {
+		t.Fatalf("OpenWithRuntime() reopened error = %v", err)
+	}
+	collectSessionStreamEvents(t, reopened.Prompt(context.Background(), "third question"))
+	if len(reopenedRequest.Messages) != 4 {
+		t.Fatalf("reopened provider messages = %#v, want summary, second turn, and current question", reopenedRequest.Messages)
+	}
+	if !strings.Contains(reopenedRequest.Messages[0].Content, "first turn summary") || !strings.Contains(reopenedRequest.Messages[0].Content, "untrusted historical data") {
+		t.Fatalf("reopened summary message = %#v, want explicitly untrusted accepted summary", reopenedRequest.Messages[0])
+	}
+	if reopenedRequest.Messages[1].Content != "second question" || reopenedRequest.Messages[2].Content != "answer-2" || reopenedRequest.Messages[3].Content != "third question" {
+		t.Fatalf("reopened provider messages = %#v, want unsummarized second turn and current question", reopenedRequest.Messages)
+	}
+	for _, message := range reopenedRequest.Messages {
+		if strings.Contains(message.Content, "first question") || strings.Contains(message.Content, "answer-1") {
+			t.Fatalf("reopened provider request repeated summarized transcript: %#v", reopenedRequest.Messages)
+		}
+	}
+}
+
+func TestSessionRejectsContextSummaryFromFailedAndCanceledRuns(t *testing.T) {
+	for _, mode := range []string{"failed", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+			providerCalls := 0
+			started := make(chan struct{})
+			provider := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+				providerCalls++
+				if providerCalls == 1 {
+					return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "first answer"}), nil
+				}
+				if mode == "failed" {
+					return nil, errors.New("provider failed after compaction")
+				}
+				close(started)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			compactor := sessionCompactorFunc(func(ctx context.Context, input agent.ContextCompactionInput) (agent.ContextSummary, error) {
+				return agent.ContextSummary{ID: "rejected-summary", Content: "must not persist"}, nil
+			})
+			runtime := agent.NewRuntime(provider, tools.NewRegistry(), "fake-model", agent.Options{Context: agent.ContextOptions{
+				ContextWindow: 25,
+				Estimator:     sessionFixedMessageEstimator{},
+				Compactor:     compactor,
+			}})
+			s, err := OpenWithRuntime(runtime, sessionPath)
+			if err != nil {
+				t.Fatalf("OpenWithRuntime() error = %v", err)
+			}
+			collectSessionStreamEvents(t, s.Prompt(context.Background(), "first question"))
+
+			var secondEvents []Event
+			if mode == "failed" {
+				secondEvents = collectSessionStreamEvents(t, s.Prompt(context.Background(), "second question"))
+			} else {
+				eventsDone := make(chan []Event, 1)
+				go func() {
+					eventsDone <- collectSessionStreamEvents(t, s.Prompt(context.Background(), "second question"))
+				}()
+				<-started
+				s.Cancel()
+				select {
+				case secondEvents = <-eventsDone:
+				case <-time.After(200 * time.Millisecond):
+					t.Fatal("canceled compacted prompt did not terminate")
+				}
+			}
+			if len(secondEvents) == 0 {
+				t.Fatal("second prompt emitted no terminal event")
+			}
+			if mode == "failed" {
+				if _, ok := secondEvents[len(secondEvents)-1].(RunFailedEvent); !ok {
+					t.Fatalf("last event = %T, want RunFailedEvent", secondEvents[len(secondEvents)-1])
+				}
+			} else if _, ok := secondEvents[len(secondEvents)-1].(RunCanceledEvent); !ok {
+				t.Fatalf("last event = %T, want RunCanceledEvent", secondEvents[len(secondEvents)-1])
+			}
+
+			state, err := loadSessionState(sessionPath)
+			if err != nil {
+				t.Fatalf("loadSessionState() error = %v", err)
+			}
+			if state.contextSummary != nil || state.summarizedMessages != 0 || len(state.messages) != 2 {
+				t.Fatalf("state after %s compacted run = %#v, want only first completed turn", mode, state)
+			}
+
+			var reopenedRequest llms.ChatRequest
+			inspector := sessionProviderFunc(func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+				reopenedRequest = req
+				return sessionChatStream(llms.Message{Role: llms.RoleAssistant, Content: "third answer"}), nil
+			})
+			reopenedRuntime := agent.NewRuntime(inspector, tools.NewRegistry(), "fake-model", agent.Options{Context: agent.ContextOptions{
+				ContextWindow: 35,
+				Estimator:     sessionFixedMessageEstimator{},
+			}})
+			reopened, err := OpenWithRuntime(reopenedRuntime, sessionPath)
+			if err != nil {
+				t.Fatalf("OpenWithRuntime() reopened error = %v", err)
+			}
+			collectSessionStreamEvents(t, reopened.Prompt(context.Background(), "third question"))
+			if len(reopenedRequest.Messages) != 3 || reopenedRequest.Messages[0].Content != "first question" || reopenedRequest.Messages[1].Content != "first answer" || reopenedRequest.Messages[2].Content != "third question" {
+				t.Fatalf("provider request after rejected summary = %#v, want original completed turn and current question", reopenedRequest.Messages)
+			}
+		})
+	}
+}
+
+type sessionFixedMessageEstimator struct{}
+
+func (sessionFixedMessageEstimator) Estimate(ctx context.Context, input agent.ContextEstimateInput) (agent.TokenEstimate, error) {
+	return agent.TokenEstimate{Tokens: len(input.Messages) * 10, Estimator: "session-fixed-test"}, nil
+}
+
+type sessionCompactorFunc func(context.Context, agent.ContextCompactionInput) (agent.ContextSummary, error)
+
+func (f sessionCompactorFunc) Compact(ctx context.Context, input agent.ContextCompactionInput) (agent.ContextSummary, error) {
+	return f(ctx, input)
+}
+
+type sessionProviderFunc func(context.Context, llms.ChatRequest) (<-chan llms.ChatStreamEvent, error)
+
+func (f sessionProviderFunc) ChatStream(ctx context.Context, request llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
+	return f(ctx, request)
+}
+
+type sessionMemoryExtractorFunc func(context.Context, agent.MemoryExtractionInput) ([]agent.MemoryCandidate, error)
+
+func (f sessionMemoryExtractorFunc) Extract(ctx context.Context, input agent.MemoryExtractionInput) ([]agent.MemoryCandidate, error) {
+	return f(ctx, input)
 }
 
 func newFakeSession(t *testing.T) *Session {
@@ -622,4 +924,22 @@ func assertSessionEventTypes(t *testing.T, events []Event, want ...Event) {
 			t.Fatalf("event[%d] = %T, want %T", i, events[i], want[i])
 		}
 	}
+}
+
+type Config = agent.Config
+
+func New(ctx context.Context, cfg Config) (*Session, error) {
+	runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewWithRuntime(runtime)
+}
+
+func Open(ctx context.Context, cfg Config, path string) (*Session, error) {
+	runtime, err := agent.NewConfiguredRuntime(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return OpenWithRuntime(runtime, path)
 }
