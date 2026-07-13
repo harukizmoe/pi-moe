@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"harukizmoe/pimoe/internal/llms"
 )
@@ -23,10 +24,20 @@ func (e maxStepsExceededError) Error() string {
 
 // Stream 从调用方提供的强语义无状态对话历史继续执行 Agent，并通过 channel 返回运行事件。
 func (a *Agent) Stream(ctx context.Context, messages []Message) <-chan Event {
+	toolSet, toolSetErr := legacyGovernedToolSet(a.tools)
+	return a.startStream(ctx, messages, toolSet, toolSetErr, nil, nil)
+}
+
+func (a *Agent) streamWithGovernedTools(ctx context.Context, messages []Message, options RunRequestOptions) <-chan Event {
+	toolSet, toolSetErr := newGovernedToolSet(options.AllowedTools, options.KnownToolNames, options.ApprovalGate)
+	return a.startStream(ctx, messages, toolSet, toolSetErr, options.MemoryItems, options.ContextSummary)
+}
+
+func (a *Agent) startStream(ctx context.Context, messages []Message, toolSet governedToolSet, toolSetErr error, memory []MemoryItem, contextSummary *ContextSummary) <-chan Event {
 	stream := make(chan Event, 64)
 	go func() {
 		defer close(stream)
-		a.stream(ctx, messages, stream)
+		a.stream(ctx, messages, stream, toolSet, toolSetErr, memory, contextSummary)
 	}()
 	return stream
 }
@@ -35,7 +46,7 @@ func newRunID() string {
 	return fmt.Sprintf("run-%d", nextRunSequence.Add(1))
 }
 
-func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Event) {
+func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Event, toolSet governedToolSet, toolSetErr error, memory []MemoryItem, contextSummary *ContextSummary) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -43,6 +54,10 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 		return emitEvent(ctx, stream, event)
 	}
 
+	if toolSetErr != nil {
+		emit(ErrorEvent{Error: fmt.Errorf("invalid run tools: %w", toolSetErr)})
+		return
+	}
 	if len(messages) == 0 {
 		emit(ErrorEvent{Error: fmt.Errorf("messages must not be empty")})
 		return
@@ -65,7 +80,7 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 
 	runID := newRunID()
 	turn := countUserMessages(messages)
-	toolSchemas := a.tools.Schemas()
+	toolSchemas := toolSet.schemas()
 	trimmedInput := strings.TrimSpace(lastMessage.Content)
 	a.logger.Info(ctx, "agent.run.start", "model", a.model, "input", trimmedInput)
 	if !emit(RunStartEvent{RunID: runID}) {
@@ -76,16 +91,29 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 	}
 
 	for chatRound := 0; ; chatRound++ {
-		llmMessages, err := toLLMMessagesWithPrompts(messages, a.basePrompt, a.sessionPrompt)
+		// 每轮 tool loop 都从当前 transcript 重新准备上下文；上一轮新增的
+		// assistant/tool-result 会立即参与预算，避免只在 Run 开始时检查一次。
+		prepared, err := a.context.prepare(ctx, messages, combineProviderPrompts(a.basePrompt, a.sessionPrompt), toolSchemas, memory, contextSummary)
 		if err != nil {
 			emit(ErrorEvent{RunID: runID, Error: err})
 			return
 		}
-		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
+		if a.context.enabled() {
+			prepared.event.RunID = runID
+			if !emit(prepared.event) {
+				return
+			}
+		}
+		if prepared.summaryCandidate != nil {
+			if !emit(ContextSummaryCandidateEvent{RunID: runID, Candidate: *prepared.summaryCandidate}) {
+				return
+			}
+		}
+		a.logLLMRequest(ctx, chatRound, len(prepared.messages), len(toolSchemas))
 		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
 		assistantMessage, err := a.runChatRound(ctx, emit, runID, messageID, chatRound, llms.ChatRequest{
 			Model:    a.model,
-			Messages: llmMessages,
+			Messages: prepared.messages,
 			Tools:    toolSchemas,
 		})
 		if err != nil {
@@ -120,23 +148,72 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 		}
 
 		a.logger.Info(ctx, "agent.tool_calls.received", "count", len(assistantMessage.ToolCalls))
+		batchCanceled := false
+		var batchCancelErr error
 		messages = append(messages, assistantMessage)
 		for _, call := range assistantMessage.ToolCalls {
-			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "arguments", call.Function.Arguments)
-			if !emit(ToolExecutionStartEvent{RunID: runID, ToolName: call.Function.Name, ToolCallID: call.ID, Arguments: call.Function.Arguments}) {
+			version := ""
+			if tool, ok := toolSet.allowed[call.Function.Name]; ok {
+				version = tool.Version
+			}
+			start := ToolExecutionStartEvent{
+				RunID:           runID,
+				ToolName:        call.Function.Name,
+				ToolCallID:      call.ID,
+				ToolVersion:     version,
+				ArgumentsDigest: digestString(call.Function.Arguments),
+				StartedAt:       time.Now().UTC(),
+			}
+			a.logger.Debug(ctx, "agent.tool.call", "name", call.Function.Name, "version", version, "arguments_digest", start.ArgumentsDigest)
+			startCtx := ctx
+			if batchCanceled {
+				startCtx = context.Background()
+			}
+			if !emitEvent(startCtx, stream, start) {
 				return
 			}
 
-			toolMessage, err := a.runToolCall(ctx, call)
-			if err != nil {
-				a.logger.Error(ctx, "agent.tool.error", "name", call.Function.Name, "error", err)
+			var outcome toolExecutionOutcome
+			if batchCanceled {
+				outcome = skippedToolOutcome(call, version, "run canceled before execution")
 			} else {
-				a.logger.Debug(ctx, "agent.tool.result", "name", call.Function.Name, "content", toolMessage.Content)
+				outcome = toolSet.execute(ctx, runID, call, emit)
 			}
-			if !emit(ToolExecutionEndEvent{RunID: runID, ToolCallID: call.ID, Result: toolMessage, Error: err}) {
+			end := ToolExecutionEndEvent{
+				RunID:           runID,
+				ToolCallID:      call.ID,
+				ToolName:        call.Function.Name,
+				ToolVersion:     outcome.toolVersion,
+				Status:          outcome.status,
+				Result:          outcome.message,
+				ArgumentsDigest: outcome.argumentsDigest,
+				OutputDigest:    outcome.outputDigest,
+				InternalDigest:  outcome.internalDigest,
+				StartedAt:       outcome.startedAt,
+				EndedAt:         outcome.endedAt,
+				Error:           outcome.err,
+			}
+			emitCtx := ctx
+			if batchCanceled || outcome.status == ToolResultCanceled {
+				emitCtx = context.Background()
+			}
+			if !emitEvent(emitCtx, stream, end) {
 				return
 			}
-			messages = append(messages, toolMessage)
+			messages = append(messages, outcome.message)
+			if outcome.status == ToolResultSuccess {
+				a.logger.Debug(context.Background(), "agent.tool.result", "name", call.Function.Name, "version", outcome.toolVersion, "status", outcome.status, "output_digest", outcome.outputDigest)
+			} else {
+				a.logger.Error(context.Background(), "agent.tool.error", "name", call.Function.Name, "version", outcome.toolVersion, "status", outcome.status, "internal_digest", outcome.internalDigest)
+			}
+			if outcome.status == ToolResultCanceled {
+				batchCanceled = true
+				batchCancelErr = outcome.err
+			}
+		}
+		if batchCanceled {
+			emitCancellation(stream, ErrorEvent{RunID: runID, Error: cancellationError(batchCancelErr, ctx)})
+			return
 		}
 	}
 }

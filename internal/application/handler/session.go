@@ -15,11 +15,11 @@ import (
 
 // SessionService 描述 SessionHandler 需要的业务能力。
 type SessionService interface {
-	Create(ctx context.Context, title string, opts ...appservice.CreateOptions) (appservice.SessionMeta, error)
-	List(ctx context.Context) ([]appservice.SessionMeta, error)
-	Get(ctx context.Context, sessionID string) (appservice.SessionDetail, error)
-	Run(ctx context.Context, sessionID string, input string, opts ...appservice.RunOptions) (appservice.RunResult, error)
-	Stream(ctx context.Context, sessionID string, input string, opts ...appservice.RunOptions) (<-chan appservice.StreamEvent, error)
+	Create(ctx context.Context, actor session.Actor, title string, opts ...appservice.CreateOptions) (appservice.SessionMeta, error)
+	List(ctx context.Context, actor session.Actor) ([]appservice.SessionMeta, error)
+	Get(ctx context.Context, actor session.Actor, sessionID string) (appservice.SessionDetail, error)
+	Run(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...appservice.RunOptions) (appservice.RunResult, error)
+	Stream(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...appservice.RunOptions) (<-chan appservice.StreamEvent, error)
 	CurrentProviderDiagnostics(ctx context.Context) (appservice.ProviderDiagnostics, error)
 }
 
@@ -120,7 +120,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 	if title == "" {
 		title = strings.TrimSpace(req.Input)
 	}
-	meta, err := h.service.Create(ctx.Request.Context(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SessionPrompt})
+	meta, err := h.service.Create(ctx.Request.Context(), session.LocalActor(), title, appservice.CreateOptions{ProviderName: req.ProviderName, MaxSteps: req.MaxSteps, SessionPrompt: req.SessionPrompt})
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
@@ -130,7 +130,7 @@ func (h *SessionHandler) Create(ctx *gin.Context) {
 
 // List 返回 managed sessions。
 func (h *SessionHandler) List(ctx *gin.Context) {
-	metas, err := h.service.List(ctx.Request.Context())
+	metas, err := h.service.List(ctx.Request.Context(), session.LocalActor())
 	if err != nil {
 		writeError(ctx, http.StatusInternalServerError, err.Error())
 		return
@@ -144,7 +144,7 @@ func (h *SessionHandler) List(ctx *gin.Context) {
 
 // Get 返回 managed session 的 metadata 和可恢复 transcript。
 func (h *SessionHandler) Get(ctx *gin.Context) {
-	detail, err := h.service.Get(ctx.Request.Context(), ctx.Param("id"))
+	detail, err := h.service.Get(ctx.Request.Context(), session.LocalActor(), ctx.Param("id"))
 	if err != nil {
 		if session.IsNotFound(err) {
 			writeError(ctx, http.StatusNotFound, err.Error())
@@ -163,7 +163,7 @@ func (h *SessionHandler) Run(ctx *gin.Context) {
 		writeError(ctx, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := h.service.Run(ctx.Request.Context(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
+	result, err := h.service.Run(ctx.Request.Context(), session.LocalActor(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
 	if err != nil {
 		if session.IsNotFound(err) {
 			writeError(ctx, http.StatusNotFound, err.Error())
@@ -186,7 +186,7 @@ func (h *SessionHandler) Stream(ctx *gin.Context) {
 		writeError(ctx, http.StatusBadRequest, err.Error())
 		return
 	}
-	events, err := h.service.Stream(ctx.Request.Context(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
+	events, err := h.service.Stream(ctx.Request.Context(), session.LocalActor(), ctx.Param("id"), req.Input, appservice.RunOptions{ProviderName: req.ProviderName})
 	if err != nil {
 		writeStreamError(ctx, err.Error())
 		return

@@ -19,6 +19,8 @@ import (
 const (
 	// sessionEntryMessage 表示一条已经进入 terminal transcript 的 Agent 消息。
 	sessionEntryMessage = "message"
+	// sessionEntrySummary 保存已接受的 context summary；只有被最新 leaf 引用时才可恢复。
+	sessionEntrySummary = "summary"
 	// sessionEntryLeaf 标记一次完整 run 的最新可恢复节点；取消或失败的半成品不会推进 leaf。
 	sessionEntryLeaf = "leaf"
 )
@@ -34,20 +36,24 @@ type fileStore struct {
 	path string
 	// parentID 指向当前可恢复 transcript 的最后一条 message entry。
 	parentID string
+	// summaryEntryID 指向最新 leaf 接受的 summary entry。
+	summaryEntryID string
 }
 
-// fileEntry 是 JSONL 的顶层记录；message 保存 transcript，leaf 保存恢复锚点。
+// fileEntry 是 JSONL 的顶层记录；message、summary 和 leaf 是三种 append-only 记录。
 type fileEntry struct {
-	// ID 是记录在文件内的稳定标识，供 parent_id 和 leaf.entry_id 引用。
+	// ID 是记录在文件内的稳定标识，供 parent_id 和 leaf 引用。
 	ID string `json:"id"`
 	// ParentID 指向上一条 message entry，用于后续支持 branch/resume。
 	ParentID string `json:"parent_id,omitempty"`
-	// Type 区分 message 和 leaf，读取时遇到未知类型直接报错，避免静默丢历史。
+	// Type 区分 message、summary 和 leaf。
 	Type string `json:"type"`
-	// Timestamp 记录写入时间，当前只用于排查和后续审计，不参与恢复顺序。
+	// Timestamp 记录写入时间，当前只用于排查和后续审计。
 	Timestamp time.Time `json:"timestamp"`
 	// Message 保存一条可发送给 Agent 的 terminal transcript 消息。
 	Message *messageEntry `json:"message,omitempty"`
+	// Summary 保存已接受的 context summary。
+	Summary *summaryEntry `json:"summary,omitempty"`
 	// Leaf 保存最近一次完整 run 的恢复锚点。
 	Leaf *leafEntry `json:"leaf,omitempty"`
 }
@@ -66,12 +72,21 @@ type messageEntry struct {
 	ToolName string `json:"tool_name,omitempty"`
 	// IsError 表示 tool result 是否为失败摘要。
 	IsError bool `json:"is_error,omitempty"`
+	// Status 保存稳定 tool result 终态；旧记录缺失时由 IsError 推导。
+	Status agent.ToolResultStatus `json:"status,omitempty"`
 }
 
-// leafEntry 指向一次完整 run 后应恢复到的最后一条 message entry。
+type summaryEntry struct {
+	SummaryID          string `json:"summary_id"`
+	Content            string `json:"content"`
+	SummarizedMessages int    `json:"summarized_messages"`
+}
+
 type leafEntry struct {
 	// EntryID 是最新可恢复 message entry 的 ID。
 	EntryID string `json:"entry_id"`
+	// SummaryEntryID 是该 leaf 接受的 summary entry；为空表示没有摘要。
+	SummaryEntryID string `json:"summary_entry_id,omitempty"`
 }
 
 // newFileStore 只记录路径；文件不存在时由 load/append 按各自语义处理。
@@ -84,40 +99,55 @@ func newSessionEntryID() string {
 	return fmt.Sprintf("entry-%d-%d", time.Now().UTC().UnixNano(), nextSessionEntrySequence.Add(1))
 }
 
+// sessionState 是文件恢复所需的 transcript、summary 和覆盖范围。
+type sessionState struct {
+	messages           []agent.Message
+	parentID           string
+	contextSummary     *agent.ContextSummary
+	summarizedMessages int
+	summaryEntryID     string
+}
+
 // load 读取磁盘 transcript 并同步 parentID，后续 append 会接在该节点之后。
-func (s *fileStore) load() ([]agent.Message, error) {
+func (s *fileStore) load() (sessionState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	messages, parentID, err := loadSessionMessages(s.path)
+	state, err := loadSessionState(s.path)
 	if err != nil {
-		return nil, err
+		return sessionState{}, err
 	}
-	s.parentID = parentID
-	return messages, nil
+	s.parentID = state.parentID
+	s.summaryEntryID = state.summaryEntryID
+	return state, nil
 }
 
-// LoadMessages 从持久化文件只读恢复 transcript,不初始化 Agent 或 Provider。
+// LoadMessages 从持久化文件只读恢复 transcript，不初始化 Agent 或 Provider。
 func LoadMessages(path string) ([]agent.Message, error) {
-	messages, _, err := loadSessionMessages(path)
-	return messages, err
+	state, err := loadSessionState(path)
+	return state.messages, err
 }
 
-// loadSessionMessages 读取 JSONL 并按最新 leaf 恢复 transcript；没有 leaf 的旧文件按顺序读取 message。
+// loadSessionMessages 保留旧的内部读取形状，供既有存储测试和工具使用。
 func loadSessionMessages(path string) ([]agent.Message, string, error) {
+	state, err := loadSessionState(path)
+	return state.messages, state.parentID, err
+}
+
+// loadSessionState 读取 JSONL 并按最新 leaf 恢复 transcript 与已接受 summary。
+func loadSessionState(path string) (sessionState, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, "", nil
+			return sessionState{}, nil
 		}
-		return nil, "", fmt.Errorf("open session file %q: %w", path, err)
+		return sessionState{}, fmt.Errorf("open session file %q: %w", path, err)
 	}
 	defer file.Close()
 
 	entriesByID := make(map[string]fileEntry)
 	messageIDs := make([]string, 0)
 	latestLeafID := ""
-
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNumber := 0
@@ -127,61 +157,75 @@ func loadSessionMessages(path string) ([]agent.Message, string, error) {
 		if line == "" {
 			continue
 		}
-
 		var entry fileEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			return nil, "", fmt.Errorf("parse session file %q line %d: %w", path, lineNumber, err)
+			return sessionState{}, fmt.Errorf("parse session file %q line %d: %w", path, lineNumber, err)
 		}
 		if entry.ID == "" {
-			return nil, "", fmt.Errorf("parse session file %q line %d: missing entry id", path, lineNumber)
+			return sessionState{}, fmt.Errorf("parse session file %q line %d: missing entry id", path, lineNumber)
 		}
 		if _, exists := entriesByID[entry.ID]; exists {
-			return nil, "", fmt.Errorf("parse session file %q line %d: duplicate entry id %q", path, lineNumber, entry.ID)
+			return sessionState{}, fmt.Errorf("parse session file %q line %d: duplicate entry id %q", path, lineNumber, entry.ID)
 		}
-
 		switch entry.Type {
 		case sessionEntryMessage:
 			if entry.Message == nil {
-				return nil, "", fmt.Errorf("parse session file %q line %d: message entry without message", path, lineNumber)
+				return sessionState{}, fmt.Errorf("parse session file %q line %d: message entry without message", path, lineNumber)
 			}
 			messageIDs = append(messageIDs, entry.ID)
+		case sessionEntrySummary:
+			if entry.Summary == nil || entry.Summary.SummaryID == "" || entry.Summary.Content == "" || entry.Summary.SummarizedMessages < 0 {
+				return sessionState{}, fmt.Errorf("parse session file %q line %d: invalid summary entry", path, lineNumber)
+			}
 		case sessionEntryLeaf:
 			if entry.Leaf == nil || entry.Leaf.EntryID == "" {
-				return nil, "", fmt.Errorf("parse session file %q line %d: leaf entry without entry_id", path, lineNumber)
+				return sessionState{}, fmt.Errorf("parse session file %q line %d: leaf entry without entry_id", path, lineNumber)
 			}
-			latestLeafID = entry.Leaf.EntryID
+			latestLeafID = entry.ID
 		default:
-			return nil, "", fmt.Errorf("parse session file %q line %d: unknown entry type %q", path, lineNumber, entry.Type)
+			return sessionState{}, fmt.Errorf("parse session file %q line %d: unknown entry type %q", path, lineNumber, entry.Type)
 		}
 		entriesByID[entry.ID] = entry
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, "", fmt.Errorf("read session file %q: %w", path, err)
+		return sessionState{}, fmt.Errorf("read session file %q: %w", path, err)
 	}
 
 	pathIDs := messageIDs
+	var latestLeaf *leafEntry
 	if latestLeafID != "" {
-		var err error
-		pathIDs, err = messagePathToLeaf(entriesByID, latestLeafID)
+		leaf := entriesByID[latestLeafID]
+		latestLeaf = leaf.Leaf
+		pathIDs, err = messagePathToLeaf(entriesByID, leaf.Leaf.EntryID)
 		if err != nil {
-			return nil, "", fmt.Errorf("load session file %q: %w", path, err)
+			return sessionState{}, fmt.Errorf("load session file %q: %w", path, err)
 		}
 	}
-
 	messages := make([]agent.Message, 0, len(pathIDs))
 	for _, id := range pathIDs {
 		message, err := decodeMessageEntry(entriesByID[id].Message)
 		if err != nil {
-			return nil, "", fmt.Errorf("load session file %q entry %q: %w", path, id, err)
+			return sessionState{}, fmt.Errorf("load session file %q entry %q: %w", path, id, err)
 		}
 		messages = append(messages, message)
 	}
-
-	parentID := ""
+	state := sessionState{messages: messages}
 	if len(pathIDs) > 0 {
-		parentID = pathIDs[len(pathIDs)-1]
+		state.parentID = pathIDs[len(pathIDs)-1]
 	}
-	return messages, parentID, nil
+	if latestLeaf != nil && latestLeaf.SummaryEntryID != "" {
+		entry, ok := entriesByID[latestLeaf.SummaryEntryID]
+		if !ok || entry.Type != sessionEntrySummary || entry.Summary == nil {
+			return sessionState{}, fmt.Errorf("load session file %q: leaf points to missing summary %q", path, latestLeaf.SummaryEntryID)
+		}
+		state.contextSummary = &agent.ContextSummary{ID: entry.Summary.SummaryID, Content: entry.Summary.Content}
+		state.summarizedMessages = entry.Summary.SummarizedMessages
+		state.summaryEntryID = latestLeaf.SummaryEntryID
+		if state.summarizedMessages > len(messages) {
+			return sessionState{}, fmt.Errorf("load session file %q: summary covers %d messages but transcript has %d", path, state.summarizedMessages, len(messages))
+		}
+	}
+	return state, nil
 }
 
 // messagePathToLeaf 沿 parent_id 回溯恢复路径，显式检查断链和环，避免损坏文件被当作空历史。
@@ -223,7 +267,14 @@ func decodeMessageEntry(entry *messageEntry) (agent.Message, error) {
 	case llms.RoleAssistant:
 		return agent.AssistantMessage{Content: entry.Content, ToolCalls: append([]llms.ToolCall(nil), entry.ToolCalls...)}, nil
 	case llms.RoleTool:
-		return agent.ToolResultMessage{ToolCallID: entry.ToolCallID, ToolName: entry.ToolName, Content: entry.Content, IsError: entry.IsError}, nil
+		status := entry.Status
+		if status == "" {
+			status = agent.ToolResultSuccess
+			if entry.IsError {
+				status = agent.ToolResultError
+			}
+		}
+		return agent.ToolResultMessage{ToolCallID: entry.ToolCallID, ToolName: entry.ToolName, Content: entry.Content, Status: status, IsError: entry.IsError}, nil
 	default:
 		return nil, fmt.Errorf("unknown message role %q", entry.Role)
 	}
@@ -237,21 +288,28 @@ func encodeMessageEntry(message agent.Message) (*messageEntry, error) {
 	case agent.AssistantMessage:
 		return &messageEntry{Role: string(llms.RoleAssistant), Content: msg.Content, ToolCalls: append([]llms.ToolCall(nil), msg.ToolCalls...)}, nil
 	case agent.ToolResultMessage:
-		return &messageEntry{Role: string(llms.RoleTool), ToolCallID: msg.ToolCallID, ToolName: msg.ToolName, Content: msg.Content, IsError: msg.IsError}, nil
+		return &messageEntry{Role: string(llms.RoleTool), ToolCallID: msg.ToolCallID, ToolName: msg.ToolName, Content: msg.Content, IsError: msg.IsError, Status: msg.Status}, nil
 	default:
 		return nil, fmt.Errorf("unsupported session message type %T", message)
 	}
 }
 
-// appendMessages 只追加已完成 run 的 terminal messages，最后再写 leaf 提交本次恢复点。
-func (s *fileStore) appendMessages(messages []agent.Message) error {
-	if len(messages) == 0 {
+// appendRun 追加 completed Run 的 transcript 和可选 summary，最后写 leaf 原子提交恢复视图。
+func (s *fileStore) appendRun(messages []agent.Message, summary *agent.ContextSummaryCandidate, summarizedMessages int) error {
+	if len(messages) == 0 && summary == nil {
 		return nil
+	}
+	if summary != nil {
+		if strings.TrimSpace(summary.Summary.ID) == "" || strings.TrimSpace(summary.Summary.Content) == "" {
+			return errors.New("persist context summary without id or content")
+		}
+		if summarizedMessages < 0 {
+			return fmt.Errorf("persist context summary with negative replacement count %d", summarizedMessages)
+		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
 	}
@@ -263,7 +321,7 @@ func (s *fileStore) appendMessages(messages []agent.Message) error {
 
 	encoder := json.NewEncoder(file)
 	parentID := s.parentID
-	lastMessageID := ""
+	lastMessageID := parentID
 	for _, message := range messages {
 		encoded, err := encodeMessageEntry(message)
 		if err != nil {
@@ -283,17 +341,39 @@ func (s *fileStore) appendMessages(messages []agent.Message) error {
 		parentID = entryID
 		lastMessageID = entryID
 	}
+	if lastMessageID == "" {
+		return errors.New("cannot commit session leaf without transcript entry")
+	}
 
+	summaryEntryID := s.summaryEntryID
+	if summary != nil {
+		summaryEntryID = newSessionEntryID()
+		entry := fileEntry{
+			ID:        summaryEntryID,
+			ParentID:  lastMessageID,
+			Type:      sessionEntrySummary,
+			Timestamp: time.Now().UTC(),
+			Summary: &summaryEntry{
+				SummaryID:          summary.Summary.ID,
+				Content:            summary.Summary.Content,
+				SummarizedMessages: summarizedMessages,
+			},
+		}
+		if err := encoder.Encode(entry); err != nil {
+			return fmt.Errorf("write session summary entry: %w", err)
+		}
+	}
 	leaf := fileEntry{
 		ID:        newSessionEntryID(),
 		ParentID:  lastMessageID,
 		Type:      sessionEntryLeaf,
 		Timestamp: time.Now().UTC(),
-		Leaf:      &leafEntry{EntryID: lastMessageID},
+		Leaf:      &leafEntry{EntryID: lastMessageID, SummaryEntryID: summaryEntryID},
 	}
 	if err := encoder.Encode(leaf); err != nil {
 		return fmt.Errorf("write session leaf entry: %w", err)
 	}
 	s.parentID = lastMessageID
+	s.summaryEntryID = summaryEntryID
 	return nil
 }

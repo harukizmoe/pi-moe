@@ -511,8 +511,8 @@ func TestAgentStreamWithProvidedHistoryEmitsToolRoundEvents(t *testing.T) {
 	if toolCall.ToolName != "calculator" {
 		t.Fatalf("tool name = %q, want calculator", toolCall.ToolName)
 	}
-	if toolCall.Arguments != `{"a":16,"b":5,"op":"mul"}` {
-		t.Fatalf("tool arguments = %q", toolCall.Arguments)
+	if toolCall.ArgumentsDigest != digestString(`{"a":16,"b":5,"op":"mul"}`) {
+		t.Fatalf("tool start leaked arguments or wrong digest: %#v", toolCall)
 	}
 
 	toolEnd := events[6].(ToolExecutionEndEvent)
@@ -742,7 +742,7 @@ func TestAgentStreamEmitsToolExecutionEventsAcrossRounds(t *testing.T) {
 	}
 
 	toolStart1 := events[5].(ToolExecutionStartEvent)
-	if toolStart1.ToolCallID != "call_step_1" || toolStart1.ToolName != "calculator" || toolStart1.Arguments != `{"a":2,"b":3,"op":"add"}` {
+	if toolStart1.ToolCallID != "call_step_1" || toolStart1.ToolName != "calculator" || toolStart1.ArgumentsDigest != digestString(`{"a":2,"b":3,"op":"add"}`) {
 		t.Fatalf("first tool start = %#v", toolStart1)
 	}
 	toolEnd1 := events[6].(ToolExecutionEndEvent)
@@ -754,7 +754,7 @@ func TestAgentStreamEmitsToolExecutionEventsAcrossRounds(t *testing.T) {
 	}
 
 	toolStart2 := events[10].(ToolExecutionStartEvent)
-	if toolStart2.ToolCallID != "call_step_2" || toolStart2.ToolName != "calculator" || toolStart2.Arguments != `{"a":5,"b":4,"op":"mul"}` {
+	if toolStart2.ToolCallID != "call_step_2" || toolStart2.ToolName != "calculator" || toolStart2.ArgumentsDigest != digestString(`{"a":5,"b":4,"op":"mul"}`) {
 		t.Fatalf("second tool start = %#v", toolStart2)
 	}
 	toolEnd2 := events[11].(ToolExecutionEndEvent)
@@ -845,8 +845,8 @@ func TestAgentStreamContinuesAfterToolErrorAndReturnsFinalAnswer(t *testing.T) {
 	if !toolEnd.Result.IsError {
 		t.Fatal("tool result IsError = false, want true")
 	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "divide by zero") {
-		t.Fatalf("tool end error = %v, want calculator divide-by-zero failure", toolEnd.Error)
+	if toolEnd.Error == nil || toolEnd.Error.Error() != "tool execution failed" || toolEnd.InternalDigest == digestString("") {
+		t.Fatalf("tool end classification/digest = %#v", toolEnd)
 	}
 
 	final := events[9].(MessageEndEvent).Message
@@ -913,8 +913,8 @@ func TestAgentStreamReturnsMaxStepsErrorWhenModelKeepsRetryingAfterToolError(t *
 	if !toolEnd.Result.IsError {
 		t.Fatal("tool result IsError = false, want true")
 	}
-	if toolEnd.Error == nil || !strings.Contains(toolEnd.Error.Error(), "divide by zero") {
-		t.Fatalf("tool end error = %v, want calculator divide-by-zero failure", toolEnd.Error)
+	if toolEnd.Error == nil || toolEnd.Error.Error() != "tool execution failed" || toolEnd.InternalDigest == digestString("") {
+		t.Fatalf("tool end classification/digest = %#v", toolEnd)
 	}
 
 	errEvent := events[9].(ErrorEvent)

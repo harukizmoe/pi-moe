@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"harukizmoe/pimoe/internal/agent"
+	"harukizmoe/pimoe/internal/llms"
 	"harukizmoe/pimoe/internal/logger"
 	"harukizmoe/pimoe/internal/session"
 )
@@ -76,6 +78,9 @@ func TestParseCLIOptionsDefaults(t *testing.T) {
 	if got.includeTrace {
 		t.Fatal("includeTrace = true, want false")
 	}
+	if gotSessionStore := cliOptionString(t, got, "sessionStore"); gotSessionStore != "file" {
+		t.Fatalf("sessionStore = %q, want file", gotSessionStore)
+	}
 	if strings.Join(got.promptArgs, " ") != "use calculator" {
 		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
 	}
@@ -103,6 +108,50 @@ func TestParseCLIOptionsAcceptsSmokeFlags(t *testing.T) {
 	}
 	if strings.Join(got.promptArgs, " ") != "use calculator" {
 		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsAcceptsPostgresSessionStore(t *testing.T) {
+	got, err := parseCLIOptions([]string{
+		"--session-store", "postgres",
+		"--postgres-dsn", "postgres://pimoe:test@localhost:5432/pimoe?sslmode=disable",
+		"use", "calculator",
+	})
+	if err != nil {
+		t.Fatalf("parseCLIOptions() error = %v", err)
+	}
+
+	if gotSessionStore := cliOptionString(t, got, "sessionStore"); gotSessionStore != "postgres" {
+		t.Fatalf("sessionStore = %q, want postgres", gotSessionStore)
+	}
+	if gotDSN := cliOptionString(t, got, "postgresDSN"); gotDSN != "postgres://pimoe:test@localhost:5432/pimoe?sslmode=disable" {
+		t.Fatalf("postgresDSN = %q, want flag value", gotDSN)
+	}
+	if strings.Join(got.promptArgs, " ") != "use calculator" {
+		t.Fatalf("promptArgs = %#v, want use calculator", got.promptArgs)
+	}
+}
+
+func TestParseCLIOptionsValidatesSessionStore(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "unknown store", args: []string{"--session-store", "sqlite", "prompt"}, wantErr: "sqlite"},
+		{name: "postgres requires dsn", args: []string{"--session-store", "postgres", "prompt"}, wantErr: "--postgres-dsn"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseCLIOptions(tt.args)
+			if err == nil {
+				t.Fatalf("parseCLIOptions(%#v) error = nil, want validation error", tt.args)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseCLIOptions(%#v) error = %q, want containing %q", tt.args, err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -259,12 +308,7 @@ func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T)
 	if err != nil {
 		t.Fatalf("readInput() first error = %v", err)
 	}
-	firstRunner, err := session.Open(context.Background(), session.Config{
-		ProviderConfigPath: firstOptions.configPath,
-		ProviderName:       firstOptions.providerName,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	}, firstOptions.sessionPath)
+	firstRunner, err := openCLITestSession(t, firstOptions.configPath, firstOptions.sessionPath)
 	if err != nil {
 		t.Fatalf("session.Open() first error = %v", err)
 	}
@@ -284,12 +328,7 @@ func TestCLISeparateSessionInstancesReuseTranscriptFromSessionFile(t *testing.T)
 	if err != nil {
 		t.Fatalf("parseCLIOptions() second error = %v", err)
 	}
-	secondRunner, err := session.Open(context.Background(), session.Config{
-		ProviderConfigPath: secondOptions.configPath,
-		ProviderName:       secondOptions.providerName,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	}, secondOptions.sessionPath)
+	secondRunner, err := openCLITestSession(t, secondOptions.configPath, secondOptions.sessionPath)
 	if err != nil {
 		t.Fatalf("session.Open() second error = %v", err)
 	}
@@ -399,7 +438,7 @@ func TestNewCLISessionStoresProviderPreference(t *testing.T) {
 	if runner == nil || managed == nil {
 		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
 	}
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -468,7 +507,7 @@ func TestNewCLISessionWithoutProviderPinsResolvedDefaultProvider(t *testing.T) {
 	if runner == nil || managed == nil {
 		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
 	}
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -518,7 +557,7 @@ func TestResumeCLISessionUsesStoredProviderPreference(t *testing.T) {
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "fake-local"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -550,7 +589,7 @@ func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *te
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "missing"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "missing"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -565,7 +604,7 @@ func TestResumeCLISessionUsesExplicitProviderOverrideAndPersistsAfterTouch(t *te
 	if err := touchManagedSession(ctx, managed); err != nil {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
-	resolved, err := manager.Resolve(ctx, created.ID)
+	resolved, err := manager.Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -585,7 +624,7 @@ func TestResumeCLISessionReportsMissingStoredProviderWithOverrideGuidance(t *tes
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "removed-provider"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "removed-provider"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -663,7 +702,7 @@ func TestNewCLISessionPersistsManagedPreferenceFlags(t *testing.T) {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
 
-	meta, err := session.NewManager(root).Resolve(ctx, managed.ID)
+	meta, err := session.NewManager(root).Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -745,7 +784,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 `)
 	root := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(root)
-	created, err := manager.Create(ctx, "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
+	created, err := manager.Create(ctx, session.LocalActor(), "resume", session.SessionConfig{ProviderName: "fake-local", MaxSteps: 1, SessionPrompt: "stored prompt"})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -773,7 +812,7 @@ func TestResumeCLISessionPersistsExplicitManagedPreferenceOverrides(t *testing.T
 	if err := touchManagedSession(ctx, managed); err != nil {
 		t.Fatalf("touchManagedSession() error = %v", err)
 	}
-	resolved, err := manager.Resolve(ctx, created.ID)
+	resolved, err := manager.Resolve(ctx, session.LocalActor(), created.ID)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -816,7 +855,7 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 		t.Fatalf("first touch error = %v", err)
 	}
 	manager := session.NewManager(root)
-	before, err := manager.Resolve(ctx, managed.ID)
+	before, err := manager.Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() before error = %v", err)
 	}
@@ -843,7 +882,7 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	if err := touchManagedSession(ctx, resumed); err != nil {
 		t.Fatalf("second touch error = %v", err)
 	}
-	after, err := manager.Resolve(ctx, managed.ID)
+	after, err := manager.Resolve(ctx, session.LocalActor(), managed.ID)
 	if err != nil {
 		t.Fatalf("Resolve() after error = %v", err)
 	}
@@ -883,19 +922,82 @@ func TestCLIManagedResumeAppendsToIndexedSession(t *testing.T) {
 	}
 }
 
+func TestCLIManagedSessionPathsUseInjectedSessionStore(t *testing.T) {
+	ctx := context.Background()
+	providerConfigPath := writeCLIProvidersConfig(t, `llms:
+  default_provider: fake-local
+  providers:
+    fake-local:
+      type: fake
+      model: fake-tool-model
+`)
+	store := newSpySessionStore(t.TempDir())
+	listed := store.seed("listed session", session.SessionConfig{ProviderName: "fake-local"})
+
+	var output bytes.Buffer
+	if err := runListSessionsWithStore(ctx, &output, store); err != nil {
+		t.Fatalf("runListSessionsWithStore() error = %v", err)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls = %d, want 1", store.listCalls)
+	}
+	if !strings.Contains(output.String(), listed.ID+"  ") {
+		t.Fatalf("runListSessionsWithStore() output = %q, want listed id %q", output.String(), listed.ID)
+	}
+
+	newOpts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", newSession: true, promptArgs: []string{"hello"}}
+	runner, managed, err := newCLISessionWithStore(ctx, newOpts, logger.NewNoop(), store, "hello")
+	if err != nil {
+		t.Fatalf("newCLISessionWithStore() create error = %v", err)
+	}
+	if runner == nil || managed == nil {
+		t.Fatalf("runner/managed = %#v/%#v, want managed session", runner, managed)
+	}
+	if store.createCalls != 1 {
+		t.Fatalf("Create calls = %d, want 1", store.createCalls)
+	}
+	if err := touchManagedSession(ctx, managed); err != nil {
+		t.Fatalf("touchManagedSession() touch error = %v", err)
+	}
+	if store.touchCalls != 1 {
+		t.Fatalf("Touch calls = %d, want 1", store.touchCalls)
+	}
+
+	resumeOpts := cliOptions{configPath: providerConfigPath, providerName: "fake-local", maxSteps: 2, sessionPrompt: "override prompt", resumeSessionID: managed.ID, promptArgs: []string{"resume"}}
+	resumedRunner, resumed, err := newCLISessionWithStore(ctx, resumeOpts, logger.NewNoop(), store, "resume")
+	if err != nil {
+		t.Fatalf("newCLISessionWithStore() resume error = %v", err)
+	}
+	if resumedRunner == nil || resumed == nil || resumed.ID != managed.ID {
+		t.Fatalf("resumed runner/managed = %#v/%#v, want id %q", resumedRunner, resumed, managed.ID)
+	}
+	if store.resolveCalls == 0 {
+		t.Fatal("Resolve calls = 0, want resume path to resolve through injected store")
+	}
+	if err := touchManagedSession(ctx, resumed); err != nil {
+		t.Fatalf("touchManagedSession() update config error = %v", err)
+	}
+	if store.updateConfigCalls != 1 {
+		t.Fatalf("UpdateConfig calls = %d, want 1", store.updateConfigCalls)
+	}
+	if store.updatedConfig.MaxSteps != 2 || store.updatedConfig.SessionPrompt != "override prompt" || store.updatedConfig.ProviderName != "fake-local" {
+		t.Fatalf("updated config = %#v, want explicit resume overrides", store.updatedConfig)
+	}
+}
+
 func TestRunListSessionsUsesManagerIndex(t *testing.T) {
 	sessionRoot := filepath.Join(t.TempDir(), "sessions")
 	manager := session.NewManager(sessionRoot)
-	first, err := manager.Create(context.Background(), "first prompt", session.SessionConfig{})
+	first, err := manager.Create(context.Background(), session.LocalActor(), "first prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() first error = %v", err)
 	}
-	second, err := manager.Create(context.Background(), "second prompt", session.SessionConfig{})
+	second, err := manager.Create(context.Background(), session.LocalActor(), "second prompt", session.SessionConfig{})
 	if err != nil {
 		t.Fatalf("Create() second error = %v", err)
 	}
 	time.Sleep(time.Millisecond)
-	if err := manager.Touch(context.Background(), first.ID); err != nil {
+	if err := manager.Touch(context.Background(), session.LocalActor(), first.ID); err != nil {
 		t.Fatalf("Touch() first error = %v", err)
 	}
 
@@ -932,11 +1034,7 @@ func TestRunInteractiveReusesSessionAcrossTurnsUntilQuit(t *testing.T) {
       model: fake-tool-model
 `)
 
-	runner, err := session.New(context.Background(), session.Config{
-		ProviderConfigPath: providerConfigPath,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	})
+	runner, err := newCLITestSession(t, providerConfigPath)
 	if err != nil {
 		t.Fatalf("session.New() error = %v", err)
 	}
@@ -966,11 +1064,7 @@ func TestRunInteractiveAcceptsPromptLongerThanScannerTokenLimit(t *testing.T) {
       model: fake-tool-model
 `)
 
-	runner, err := session.New(context.Background(), session.Config{
-		ProviderConfigPath: providerConfigPath,
-		Logger:             logger.NewNoop(),
-		MaxSteps:           1,
-	})
+	runner, err := newCLITestSession(t, providerConfigPath)
 	if err != nil {
 		t.Fatalf("session.New() error = %v", err)
 	}
@@ -1018,10 +1112,14 @@ func TestCollectRunOutputAnswerOnlyReturnsAnswerWithTrailingNewline(t *testing.T
 
 func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 	output, err := collectRunOutput(eventStream(
-		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-1", Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5"}},
-		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-2", Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20"}},
+		session.MessageEndEvent{Message: agent.AssistantMessage{ToolCalls: []llms.ToolCall{
+			{ID: "call-1", Type: "function", Function: llms.ToolCallFunction{Name: "calculator", Arguments: `{"a":2,"b":3,"op":"add"}`}},
+			{ID: "call-2", Type: "function", Function: llms.ToolCallFunction{Name: "calculator", Arguments: `{"a":5,"b":4,"op":"multiply"}`}},
+		}}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-1", ToolName: "calculator"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-1", Status: session.ToolResultSuccess, Result: agent.ToolResultMessage{ToolCallID: "call-1", ToolName: "calculator", Content: "5", Status: agent.ToolResultSuccess}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-2", ToolName: "calculator"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-2", Status: session.ToolResultSuccess, Result: agent.ToolResultMessage{ToolCallID: "call-2", ToolName: "calculator", Content: "20", Status: agent.ToolResultSuccess}},
 		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "final answer: 20"}},
 		session.RunEndEvent{RunID: "run-1"},
 	))
@@ -1050,8 +1148,11 @@ func TestCollectRunOutputTraceIncludesSuccessfulToolSteps(t *testing.T) {
 func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	toolErr := errors.New("upstream unavailable")
 	output, err := collectRunOutput(eventStream(
-		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather", Arguments: `{"city":"Tokyo"}`},
-		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, IsError: true}, Error: toolErr},
+		session.MessageEndEvent{Message: agent.AssistantMessage{ToolCalls: []llms.ToolCall{
+			{ID: "call-weather", Type: "function", Function: llms.ToolCallFunction{Name: "weather", Arguments: `{"city":"Tokyo"}`}},
+		}}},
+		session.ToolExecutionStartEvent{ToolCallID: "call-weather", ToolName: "weather"},
+		session.ToolExecutionEndEvent{ToolCallID: "call-weather", Status: session.ToolResultError, Result: agent.ToolResultMessage{ToolCallID: "call-weather", ToolName: "weather", Content: `tool "weather" failed: upstream unavailable`, Status: agent.ToolResultError, IsError: true}, Error: toolErr},
 		session.MessageEndEvent{Message: agent.AssistantMessage{Content: "could not complete weather lookup"}},
 		session.RunEndEvent{RunID: "run-1"},
 	))
@@ -1067,7 +1168,7 @@ func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 	for _, want := range []string{
 		"tool=weather",
 		`arguments={"city":"Tokyo"}`,
-		"error=upstream unavailable",
+		`error=tool "weather" failed: upstream unavailable`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatRunOutput(trace error) missing %q in %q", want, got)
@@ -1077,6 +1178,83 @@ func TestCollectRunOutputTraceIncludesToolErrors(t *testing.T) {
 		t.Fatalf("formatRunOutput(trace error) exposed nil result placeholder: %q", got)
 	}
 }
+
+type spySessionStore struct {
+	root              string
+	nextID            int
+	metas             map[string]session.SessionMeta
+	createCalls       int
+	resolveCalls      int
+	listCalls         int
+	touchCalls        int
+	updateConfigCalls int
+	updatedConfig     session.SessionConfig
+}
+
+func newSpySessionStore(root string) *spySessionStore {
+	return &spySessionStore{root: root, metas: make(map[string]session.SessionMeta)}
+}
+
+func (s *spySessionStore) seed(title string, cfg session.SessionConfig) session.SessionMeta {
+	s.nextID++
+	id := fmt.Sprintf("spy-session-%d", s.nextID)
+	meta := session.SessionMeta{
+		ID:        id,
+		OwnerID:   session.LocalActor().UserID,
+		Path:      filepath.Join(s.root, id+".jsonl"),
+		Title:     title,
+		CreatedAt: time.Date(2026, 7, 10, 12, 0, s.nextID, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 7, 10, 12, 0, s.nextID, 0, time.UTC),
+		Config:    cfg,
+	}
+	s.metas[id] = meta
+	return meta
+}
+
+func (s *spySessionStore) Create(ctx context.Context, actor session.Actor, title string, cfg session.SessionConfig) (session.SessionMeta, error) {
+	s.createCalls++
+	return s.seed(title, cfg), nil
+}
+
+func (s *spySessionStore) Resolve(ctx context.Context, actor session.Actor, id string) (session.SessionMeta, error) {
+	s.resolveCalls++
+	meta, ok := s.metas[id]
+	if !ok {
+		return session.SessionMeta{}, session.NewNotFoundError(id)
+	}
+	return meta, nil
+}
+
+func (s *spySessionStore) List(ctx context.Context, actor session.Actor) ([]session.SessionMeta, error) {
+	s.listCalls++
+	metas := make([]session.SessionMeta, 0, len(s.metas))
+	for _, meta := range s.metas {
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
+func (s *spySessionStore) UpdateConfig(ctx context.Context, actor session.Actor, id string, cfg session.SessionConfig) error {
+	s.updateConfigCalls++
+	meta, ok := s.metas[id]
+	if !ok {
+		return session.NewNotFoundError(id)
+	}
+	meta.Config = cfg
+	s.metas[id] = meta
+	s.updatedConfig = cfg
+	return nil
+}
+
+func (s *spySessionStore) Touch(ctx context.Context, actor session.Actor, id string) error {
+	s.touchCalls++
+	if _, ok := s.metas[id]; !ok {
+		return session.NewNotFoundError(id)
+	}
+	return nil
+}
+
+var _ session.SessionStore = (*spySessionStore)(nil)
 
 func eventStream(events ...session.Event) <-chan session.Event {
 	stream := make(chan session.Event, len(events))
@@ -1130,4 +1308,30 @@ func collectUserPrompts(messages []agent.Message) []string {
 		}
 	}
 	return userPrompts
+}
+
+func openCLITestSession(t *testing.T, configPath, sessionPath string) (*session.Session, error) {
+	t.Helper()
+	runtime, err := agent.NewConfiguredRuntime(context.Background(), agent.Config{
+		ProviderConfigPath: configPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return session.OpenWithRuntime(runtime, sessionPath)
+}
+
+func newCLITestSession(t *testing.T, configPath string) (*session.Session, error) {
+	t.Helper()
+	runtime, err := agent.NewConfiguredRuntime(context.Background(), agent.Config{
+		ProviderConfigPath: configPath,
+		Logger:             logger.NewNoop(),
+		MaxSteps:           1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return session.NewWithRuntime(runtime)
 }

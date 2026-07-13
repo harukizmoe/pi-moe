@@ -183,7 +183,7 @@ func TestAgentStreamStreamingToolCallsContinueWithToolResult(t *testing.T) {
 	}
 
 	toolStart := events[7].(ToolExecutionStartEvent)
-	if toolStart.ToolCallID != toolCall.ID || toolStart.ToolName != toolCall.Function.Name || toolStart.Arguments != toolCall.Function.Arguments {
+	if toolStart.ToolCallID != toolCall.ID || toolStart.ToolName != toolCall.Function.Name || toolStart.ArgumentsDigest != digestString(toolCall.Function.Arguments) {
 		t.Fatalf("tool start = %#v", toolStart)
 	}
 
@@ -324,25 +324,30 @@ func TestAgentStreamPreservesWhitespaceToolCallDeltaAndRejectsBlankArguments(t *
 	blankArgsCall := calculatorToolCall("call_blank_args", " ")
 	provider := &streamingProviderStub{}
 	provider.streamFunc = func(ctx context.Context, req llms.ChatRequest) (<-chan llms.ChatStreamEvent, error) {
-		if provider.streamCalls != 1 {
+		switch provider.streamCalls {
+		case 1:
+			return streamEvents(
+				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCallDelta{{Index: 0, ID: blankArgsCall.ID, Type: blankArgsCall.Type, Function: llms.ToolCallFunctionDelta{Name: blankArgsCall.Function.Name, Arguments: " "}}}}},
+				llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{blankArgsCall}}},
+			), nil
+		case 2:
+			if result := req.Messages[2]; result.Role != llms.RoleTool || result.Content != `tool "calculator" received invalid arguments` {
+				t.Fatalf("blank argument result = %#v", result)
+			}
+			return streamEvents(assistantTextDelta("arguments rejected"), assistantDone(llms.Message{Role: llms.RoleAssistant, Content: "arguments rejected"})), nil
+		default:
 			t.Fatalf("unexpected ChatStream round = %d", provider.streamCalls)
 			return nil, nil
 		}
-		return streamEvents(
-			llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDelta, Delta: llms.ChatStreamDelta{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCallDelta{{Index: 0, ID: blankArgsCall.ID, Type: blankArgsCall.Type, Function: llms.ToolCallFunctionDelta{Name: blankArgsCall.Function.Name, Arguments: " "}}}}},
-			llms.ChatStreamEvent{Type: llms.ChatStreamEventTypeDone, Message: llms.Message{Role: llms.RoleAssistant, ToolCalls: []llms.ToolCall{blankArgsCall}}},
-		), nil
 	}
 
 	a := New(provider, registry, "fake-tool-model")
 	events := collectStreamEvents(t, streamAgentText(a, context.Background(), "call calculator with blank args"))
 
 	assertEventTypes(t, events,
-		RunStartEvent{},
-		TurnStartEvent{},
-		MessageStartEvent{},
-		MessageDeltaEvent{},
-		ErrorEvent{},
+		RunStartEvent{}, TurnStartEvent{}, MessageStartEvent{}, MessageDeltaEvent{}, MessageEndEvent{},
+		ToolExecutionStartEvent{}, ToolExecutionEndEvent{},
+		MessageStartEvent{}, MessageDeltaEvent{}, MessageEndEvent{}, TurnEndEvent{}, RunEndEvent{},
 	)
 
 	toolDelta := events[3].(MessageDeltaEvent)
@@ -353,11 +358,11 @@ func TestAgentStreamPreservesWhitespaceToolCallDeltaAndRejectsBlankArguments(t *
 		t.Fatalf("tool delta = %q, want single-space arguments", toolDelta.Delta)
 	}
 
-	errEvent := events[4].(ErrorEvent)
-	if errEvent.Error == nil || !strings.Contains(errEvent.Error.Error(), "tool call arguments") {
-		t.Fatalf("stream error = %v, want tool call argument validation", errEvent.Error)
+	toolEnd := events[6].(ToolExecutionEndEvent)
+	if toolEnd.Status != ToolResultError || toolEnd.Result.Content != `tool "calculator" received invalid arguments` {
+		t.Fatalf("tool end = %#v, want paired blank argument error", toolEnd)
 	}
-	if len(provider.requests) != 1 {
-		t.Fatalf("provider requests len = %d, want one failed validation round", len(provider.requests))
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider requests len = %d, want paired result follow-up", len(provider.requests))
 	}
 }

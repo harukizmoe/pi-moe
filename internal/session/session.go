@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,52 +11,55 @@ import (
 	"harukizmoe/pimoe/internal/llms"
 )
 
-// Config 保存创建 Session 所需的 Agent 装配配置。
-type Config = agent.Config
+// RuntimeFactory 已由应用层完成 Provider、capability 和策略装配后注入 Session。
+type RuntimeFactory func(context.Context) (*agent.Runtime, error)
 
-// Session 保存一次多 turn Agent 对话的内存态 transcript 和运行控制。
+// Session 保存一次多 turn Agent 对话的内存态 transcript、运行控制和已提交记忆候选。
 type Session struct {
-	// mu 保护 messages 和 cancel；Agent Stream 在锁外执行，避免阻塞取消路径。
+	// mu 保护 messages、memoryCandidates 和 cancel；Runtime 在锁外执行，避免阻塞取消路径。
 	mu sync.Mutex
-	// agent 是已装配好的执行器，Session 只负责喂 transcript 和消费 terminal events。
-	agent *agent.Agent
+	// runtime 是调用方注入的执行边界，Session 不拥有 Provider 或 Tool Registry。
+	runtime *agent.Runtime
 	// messages 只保存 terminal transcript：user、assistant 完整消息和 tool result；delta 事件不进入历史。
 	messages []agent.Message
+	// contextSummary 是 completed Run 接受的摘要；summarizedMessages 是其覆盖的 transcript 前缀长度。
+	contextSummary     *agent.ContextSummary
+	summarizedMessages int
+	// memoryCandidates 仅保存 completed Run 的候选，失败/取消不会推进。
+	memoryCandidates []agent.MemoryCandidate
 	// cancel 指向当前运行中的 prompt；非 nil 表示禁止并发 turn。
 	cancel context.CancelFunc
-	// store 非 nil 时启用 JSONL 持久化；New 创建的纯内存 Session 保持原行为。
+	// store 非 nil 时启用 JSONL 持久化；NewWithRuntime 创建的纯内存 Session 保持原行为。
 	store *fileStore
 }
 
-// New 创建一个持有独立 transcript 的 Agent 会话。
-func New(ctx context.Context, cfg Config) (*Session, error) {
-	runner, err := agent.NewConfigured(ctx, cfg)
-	if err != nil {
-		return nil, err
+// NewWithRuntime 创建一个持有独立 transcript 的 Runtime 会话。
+func NewWithRuntime(runtime *agent.Runtime) (*Session, error) {
+	if runtime == nil {
+		return nil, fmt.Errorf("runtime must not be nil")
 	}
-	return &Session{
-		agent: runner,
-	}, nil
+	return &Session{runtime: runtime}, nil
 }
 
-// Open 创建或恢复一个文件持久化 Session；只有完整 run 推进恢复点，取消中的 prompt 不会落盘。
-func Open(ctx context.Context, cfg Config, path string) (*Session, error) {
+// OpenWithRuntime 创建或恢复一个文件持久化 Runtime 会话。
+func OpenWithRuntime(runtime *agent.Runtime, path string) (*Session, error) {
+	if runtime == nil {
+		return nil, fmt.Errorf("runtime must not be nil")
+	}
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("session path must not be empty")
 	}
-	runner, err := agent.NewConfigured(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
 	store := newFileStore(path)
-	messages, err := store.load()
+	state, err := store.load()
 	if err != nil {
 		return nil, err
 	}
 	return &Session{
-		agent:    runner,
-		messages: messages,
-		store:    store,
+		runtime:            runtime,
+		messages:           state.messages,
+		contextSummary:     cloneSessionContextSummary(state.contextSummary),
+		summarizedMessages: state.summarizedMessages,
+		store:              store,
 	}, nil
 }
 
@@ -85,11 +89,13 @@ func (s *Session) Prompt(ctx context.Context, input string) <-chan Event {
 	// baseLen 是本轮开始前的 transcript 边界；取消时回滚，成功时只持久化新增部分。
 	baseLen := len(s.messages)
 	s.messages = append(s.messages, userMessage)
-	snapshot := cloneSessionMessages(s.messages)
+	summaryBase := s.summarizedMessages
+	snapshot := cloneSessionMessages(s.messages[summaryBase:])
+	contextSummary := cloneSessionContextSummary(s.contextSummary)
 	s.mu.Unlock()
 
 	out := make(chan Event, 64)
-	go s.runPrompt(ctx, cancel, snapshot, baseLen, out)
+	go s.runPrompt(ctx, cancel, snapshot, baseLen, summaryBase, contextSummary, out)
 	return out
 }
 
@@ -98,6 +104,13 @@ func (s *Session) Messages() []agent.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneSessionMessages(s.messages)
+}
+
+// MemoryCandidates 返回最近一次 completed Run 提交的候选快照。
+func (s *Session) MemoryCandidates() []agent.MemoryCandidate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agent.MemoryCandidate(nil), s.memoryCandidates...)
 }
 
 // Cancel 取消当前运行；没有运行时是 no-op。
@@ -110,14 +123,15 @@ func (s *Session) Cancel() {
 	}
 }
 
-// runPrompt 桥接 Agent 事件流和 Session 状态：先更新内存，再广播事件，RunEnd 后提交持久化。
-func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snapshot []agent.Message, baseLen int, out chan<- Event) {
+// runPrompt 桥接 Runtime 事件和 Session 状态：先更新内存，成功终态后提交，失败终态回滚。
+func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snapshot []agent.Message, baseLen, summaryBase int, contextSummary *agent.ContextSummary, out chan<- Event) {
 	defer close(out)
 	completed := false
-	canceled := false
+	pendingCandidates := []agent.MemoryCandidate(nil)
+	var pendingSummary *agent.ContextSummaryCandidate
 	defer func() {
 		cancel()
-		if canceled && !completed {
+		if !completed {
 			s.discardMessagesFrom(baseLen)
 		}
 		s.mu.Lock()
@@ -125,42 +139,56 @@ func (s *Session) runPrompt(ctx context.Context, cancel context.CancelFunc, snap
 		s.mu.Unlock()
 	}()
 
-	for event := range s.agent.Stream(ctx, snapshot) {
-		// 只有 Agent 发出 RunEnd 才说明本轮 terminal transcript 完整，可安全推进 durable leaf。
-		if runEnd, ok := event.(RunEndEvent); ok {
-			if err := s.persistMessagesFrom(baseLen); err != nil {
-				terminal := ErrorEvent{RunID: runEnd.RunID, Error: err}
-				emitSessionTerminal(out, terminal)
+	request := agent.NewRunRequestWithOptions(snapshot, agent.RunRequestOptions{ContextSummary: contextSummary})
+	for event := range s.runtime.Run(ctx, request) {
+		switch event := event.(type) {
+		case ContextSummaryCandidateEvent:
+			candidate := event.Candidate
+			pendingSummary = &candidate
+			continue
+		case MemoryCandidateEvent:
+			pendingCandidates = append([]agent.MemoryCandidate(nil), event.Candidates...)
+			continue
+		case RunCompletedEvent:
+			if pendingSummary != nil && (pendingSummary.ReplacedMessages < 0 || pendingSummary.ReplacedMessages > len(snapshot)) {
+				s.discardMessagesFrom(baseLen)
+				emitSessionTerminal(out, RunFailedEvent{RunID: event.RunID, Error: fmt.Errorf("invalid context summary replacement count %d", pendingSummary.ReplacedMessages)})
 				return
 			}
+			totalSummarized := summaryBase
+			if pendingSummary != nil {
+				totalSummarized += pendingSummary.ReplacedMessages
+			}
+			if err := s.persistRun(baseLen, pendingSummary, totalSummarized); err != nil {
+				s.discardMessagesFrom(baseLen)
+				emitSessionTerminal(out, RunFailedEvent{RunID: event.RunID, Error: err})
+				return
+			}
+			s.mu.Lock()
+			s.memoryCandidates = append([]agent.MemoryCandidate(nil), pendingCandidates...)
+			if pendingSummary != nil {
+				summary := pendingSummary.Summary
+				s.contextSummary = &summary
+				s.summarizedMessages = totalSummarized
+			}
+			s.mu.Unlock()
 			completed = true
-		}
-		if _, ok := event.(ErrorEvent); ok && ctx.Err() != nil {
-			canceled = true
+			emitSessionTerminal(out, event)
+			return
+		case RunFailedEvent:
+			emitSessionTerminal(out, event)
+			return
+		case RunCanceledEvent:
 			emitSessionTerminal(out, event)
 			return
 		}
 
-		// 只把 terminal 事件纳入 transcript；MessageDelta 等流式 UI 事件不参与恢复。
 		s.applyTerminalEvent(event)
-		if !emitSessionEvent(ctx, out, event) {
-			if err := ctx.Err(); err != nil && !completed {
-				canceled = true
-				terminal := ErrorEvent{Error: err}
-				emitSessionTerminal(out, terminal)
-			}
-			return
+		if ctx == nil || ctx.Err() == nil {
+			_ = emitSessionEvent(ctx, out, event)
 		}
 	}
-	if err := ctx.Err(); err != nil && !completed {
-		canceled = true
-		terminal := ErrorEvent{Error: err}
-		emitSessionTerminal(out, terminal)
-		return
-	}
-	if !completed {
-		s.discardMessagesFrom(baseLen)
-	}
+	emitSessionTerminal(out, RunFailedEvent{Error: errors.New("runtime ended without terminal event")})
 }
 
 // applyTerminalEvent 将 Agent 终态事件转换为 Session transcript 事实。
@@ -185,8 +213,8 @@ func (s *Session) discardMessagesFrom(index int) {
 	}
 }
 
-// persistMessagesFrom 把本轮新增 transcript 复制到锁外写盘，避免文件 IO 阻塞 Session 状态锁。
-func (s *Session) persistMessagesFrom(index int) error {
+// persistRun 将本轮 transcript 与已接受 summary 在一次 append-only leaf 中提交。
+func (s *Session) persistRun(index int, summary *agent.ContextSummaryCandidate, summarizedMessages int) error {
 	s.mu.Lock()
 	store := s.store
 	if store == nil || index >= len(s.messages) {
@@ -196,13 +224,18 @@ func (s *Session) persistMessagesFrom(index int) error {
 	messages := cloneSessionMessages(s.messages[index:])
 	s.mu.Unlock()
 
-	if len(messages) == 0 {
-		return nil
-	}
-	if err := store.appendMessages(messages); err != nil {
-		return fmt.Errorf("persist session messages: %w", err)
+	if err := store.appendRun(messages, summary, summarizedMessages); err != nil {
+		return fmt.Errorf("persist session run: %w", err)
 	}
 	return nil
+}
+
+func cloneSessionContextSummary(summary *agent.ContextSummary) *agent.ContextSummary {
+	if summary == nil {
+		return nil
+	}
+	cloned := *summary
+	return &cloned
 }
 
 func emitSessionEvent(ctx context.Context, stream chan<- Event, event Event) bool {
@@ -221,10 +254,7 @@ func emitSessionEvent(ctx context.Context, stream chan<- Event, event Event) boo
 }
 
 func emitSessionTerminal(stream chan<- Event, event Event) {
-	select {
-	case stream <- event:
-	default:
-	}
+	stream <- event
 }
 
 func closedErrorStream(err error) <-chan Event {

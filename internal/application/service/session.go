@@ -19,6 +19,8 @@ import (
 type SessionConfig struct {
 	// SessionRoot 是 session.Manager 保存 index 和 transcript 的根目录；为空时使用默认目录。
 	SessionRoot string
+	// Store 覆盖 session metadata store；为空时使用 SessionRoot 创建 file-backed store。
+	Store session.SessionStore
 	// ProviderConfigPath 指向 providers YAML 配置文件。
 	ProviderConfigPath string
 	// ProviderName 选择配置文件中的 Provider 实例；为空时使用 default_provider。
@@ -33,8 +35,8 @@ type SessionConfig struct {
 
 // SessionService 编排 session metadata、transcript 和 Agent run。
 type SessionService struct {
-	manager    *session.Manager
-	config     session.Config
+	store      session.SessionStore
+	config     agent.Config
 	basePrompt string
 
 	// sessionRunLocks 按 session ID 串行化会推进 transcript leaf 的 Run/Stream。
@@ -188,9 +190,13 @@ func NewSessionService(cfg SessionConfig) (*SessionService, error) {
 	if strings.TrimSpace(cfg.ProviderConfigPath) == "" {
 		return nil, fmt.Errorf("provider config path must not be empty")
 	}
+	store := cfg.Store
+	if store == nil {
+		store = session.NewManager(cfg.SessionRoot)
+	}
 	return &SessionService{
-		manager: session.NewManager(cfg.SessionRoot),
-		config: session.Config{
+		store: store,
+		config: agent.Config{
 			ProviderConfigPath: cfg.ProviderConfigPath,
 			ProviderName:       cfg.ProviderName,
 			BaseSystemPrompt:   strings.TrimSpace(cfg.BaseSystemPrompt),
@@ -315,10 +321,10 @@ func (s *SessionService) lockSessionRun(ctx context.Context, sessionID string) (
 	}
 }
 
-func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (session.Config, string, bool, error) {
+func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta, opts RunOptions) (agent.Config, string, bool, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return session.Config{}, "", false, err
+			return agent.Config{}, "", false, err
 		}
 	}
 	providerName := strings.TrimSpace(opts.ProviderName)
@@ -341,9 +347,9 @@ func (s *SessionService) resolveRunConfig(ctx context.Context, meta SessionMeta,
 	}
 	if err := ensureProviderConfigured(runCfg.ProviderConfigPath, providerName); err != nil {
 		if meta.Config.ProviderName != "" && !override {
-			return session.Config{}, "", false, newProviderSelectionError("session %q provider %q is not configured; specify provider_name to choose another provider", meta.ID, providerName)
+			return agent.Config{}, "", false, newProviderSelectionError("session %q provider %q is not configured; specify provider_name to choose another provider", meta.ID, providerName)
 		}
-		return session.Config{}, "", false, err
+		return agent.Config{}, "", false, err
 	}
 	return runCfg, providerName, override, nil
 }
@@ -362,17 +368,17 @@ func ensureProviderConfigured(path string, providerName string) error {
 	return nil
 }
 
-func (s *SessionService) persistRunSuccess(ctx context.Context, meta SessionMeta, providerName string, override bool) error {
+func (s *SessionService) persistRunSuccess(ctx context.Context, actor session.Actor, meta SessionMeta, providerName string, override bool) error {
 	if override {
 		cfg := meta.Config
 		cfg.ProviderName = providerName
-		return s.manager.UpdateConfig(ctx, meta.ID, cfg)
+		return s.store.UpdateConfig(ctx, actor, meta.ID, cfg)
 	}
-	return s.manager.Touch(ctx, meta.ID)
+	return s.store.Touch(ctx, actor, meta.ID)
 }
 
 // Create 创建一个 managed session，并用 title 生成可读标题。
-func (s *SessionService) Create(ctx context.Context, title string, opts ...CreateOptions) (SessionMeta, error) {
+func (s *SessionService) Create(ctx context.Context, actor session.Actor, title string, opts ...CreateOptions) (SessionMeta, error) {
 	if s == nil {
 		return SessionMeta{}, fmt.Errorf("session service is nil")
 	}
@@ -380,23 +386,23 @@ func (s *SessionService) Create(ctx context.Context, title string, opts ...Creat
 	if err != nil {
 		return SessionMeta{}, err
 	}
-	return s.manager.Create(ctx, title, cfg)
+	return s.store.Create(ctx, actor, title, cfg)
 }
 
 // List 返回可恢复 sessions。
-func (s *SessionService) List(ctx context.Context) ([]SessionMeta, error) {
+func (s *SessionService) List(ctx context.Context, actor session.Actor) ([]SessionMeta, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
-	return s.manager.List(ctx)
+	return s.store.List(ctx, actor)
 }
 
 // Get 返回 session metadata 和当前可恢复 transcript。
-func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDetail, error) {
+func (s *SessionService) Get(ctx context.Context, actor session.Actor, sessionID string) (SessionDetail, error) {
 	if s == nil {
 		return SessionDetail{}, fmt.Errorf("session service is nil")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return SessionDetail{}, err
 	}
@@ -412,14 +418,14 @@ func (s *SessionService) Get(ctx context.Context, sessionID string) (SessionDeta
 }
 
 // Run 在指定 session 上执行一轮 prompt，并返回最终答案和工具步骤。
-func (s *SessionService) Run(ctx context.Context, sessionID string, input string, opts ...RunOptions) (RunResult, error) {
+func (s *SessionService) Run(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...RunOptions) (RunResult, error) {
 	if s == nil {
 		return RunResult{}, fmt.Errorf("session service is nil")
 	}
 	if strings.TrimSpace(input) == "" {
 		return RunResult{}, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -428,7 +434,7 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 		return RunResult{}, err
 	}
 	defer unlock()
-	meta, err = s.manager.Resolve(ctx, meta.ID)
+	meta, err = s.store.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -436,7 +442,11 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return RunResult{}, err
 	}
-	runner, err := session.Open(ctx, runCfg, meta.Path)
+	runtime, err := agent.NewConfiguredRuntime(ctx, runCfg)
+	if err != nil {
+		return RunResult{}, err
+	}
+	runner, err := session.OpenWithRuntime(runtime, meta.Path)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -444,21 +454,21 @@ func (s *SessionService) Run(ctx context.Context, sessionID string, input string
 	if err != nil {
 		return result, err
 	}
-	if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
+	if err := s.persistRunSuccess(ctx, actor, meta, providerName, override); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 // Stream 在指定 session 上执行一轮 prompt，并返回稳定的应用层流式事件。
-func (s *SessionService) Stream(ctx context.Context, sessionID string, input string, opts ...RunOptions) (<-chan StreamEvent, error) {
+func (s *SessionService) Stream(ctx context.Context, actor session.Actor, sessionID string, input string, opts ...RunOptions) (<-chan StreamEvent, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session service is nil")
 	}
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input must not be empty")
 	}
-	meta, err := s.manager.Resolve(ctx, sessionID)
+	meta, err := s.store.Resolve(ctx, actor, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +481,7 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 			unlock()
 		}
 	}()
-	meta, err = s.manager.Resolve(ctx, meta.ID)
+	meta, err = s.store.Resolve(ctx, actor, meta.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +489,11 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	if err != nil {
 		return nil, err
 	}
-	runner, err := session.Open(ctx, runCfg, meta.Path)
+	runtime, err := agent.NewConfiguredRuntime(ctx, runCfg)
+	if err != nil {
+		return nil, err
+	}
+	runner, err := session.OpenWithRuntime(runtime, meta.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +502,7 @@ func (s *SessionService) Stream(ctx context.Context, sessionID string, input str
 	streamUnlock := unlock
 	go func() {
 		defer streamUnlock()
-		s.forwardStreamEvents(ctx, meta, providerName, override, runner.Prompt(ctx, input), out)
+		s.forwardStreamEvents(ctx, actor, meta, providerName, override, runner.Prompt(ctx, input), out)
 	}()
 	unlock = nil
 	return out, nil
@@ -538,9 +552,10 @@ func stableRawJSON(value string) json.RawMessage {
 	return encoded
 }
 
-func (s *SessionService) forwardStreamEvents(ctx context.Context, meta SessionMeta, providerName string, override bool, events <-chan session.Event, out chan<- StreamEvent) {
+func (s *SessionService) forwardStreamEvents(ctx context.Context, actor session.Actor, meta SessionMeta, providerName string, override bool, events <-chan session.Event, out chan<- StreamEvent) {
 	defer close(out)
 	var answer string
+	argumentsByCallID := make(map[string]json.RawMessage)
 	for event := range events {
 		switch event := event.(type) {
 		case session.MessageDeltaEvent:
@@ -551,33 +566,43 @@ func (s *SessionService) forwardStreamEvents(ctx context.Context, meta SessionMe
 				}
 			}
 		case session.ToolExecutionStartEvent:
-			if !sendStreamEvent(ctx, out, StreamEvent{Name: "tool_call", Data: streamToolCallData{ID: event.ToolCallID, Tool: event.ToolName, Arguments: json.RawMessage(event.Arguments)}}) {
+			arguments := argumentsByCallID[event.ToolCallID]
+			if len(arguments) == 0 {
+				arguments = json.RawMessage(`{}`)
+			}
+			if !sendStreamEvent(ctx, out, StreamEvent{Name: "tool_call", Data: streamToolCallData{ID: event.ToolCallID, Tool: event.ToolName, Arguments: arguments}}) {
 				return
 			}
 		case session.ToolExecutionEndEvent:
 			data := streamToolResultData{ID: event.ToolCallID, Tool: event.Result.ToolName}
-			if event.Error != nil {
-				data.Error = event.Error.Error()
-			} else if event.Result.IsError {
-				data.Error = event.Result.Content
-			} else {
+			if event.Status == agent.ToolResultSuccess {
 				data.Result = event.Result.Content
+			} else {
+				data.Error = event.Result.Content
 			}
 			if !sendStreamEvent(ctx, out, StreamEvent{Name: "tool_result", Data: data}) {
 				return
 			}
 		case session.MessageEndEvent:
+			for _, call := range event.Message.ToolCalls {
+				argumentsByCallID[call.ID] = stableRawJSON(call.Function.Arguments)
+			}
 			if len(event.Message.ToolCalls) == 0 {
 				answer = event.Message.Content
 			}
-		case session.RunEndEvent:
-			if err := s.persistRunSuccess(ctx, meta, providerName, override); err != nil {
+		case session.RunCompletedEvent:
+			if err := s.persistRunSuccess(ctx, actor, meta, providerName, override); err != nil {
 				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: err.Error()}})
 				return
 			}
 			_ = sendStreamEvent(ctx, out, StreamEvent{Name: "done", Data: streamDoneData{Answer: answer}})
 			return
-		case session.ErrorEvent:
+		case session.RunFailedEvent:
+			if event.Error != nil {
+				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: event.Error.Error()}})
+			}
+			return
+		case session.RunCanceledEvent:
 			if event.Error != nil {
 				_ = sendStreamEvent(ctx, out, StreamEvent{Name: "error", Data: streamErrorData{Error: event.Error.Error()}})
 			}
@@ -598,11 +623,13 @@ func sendStreamEvent(ctx context.Context, out chan<- StreamEvent, event StreamEv
 func collectRunResult(events <-chan session.Event) (RunResult, error) {
 	var result RunResult
 	stepByCallID := make(map[string]int)
+	argumentsByCallID := make(map[string]string)
 	for event := range events {
 		switch event := event.(type) {
 		case session.ToolExecutionStartEvent:
 			stepByCallID[event.ToolCallID] = len(result.ToolSteps)
-			result.ToolSteps = append(result.ToolSteps, ToolStep{ToolCallID: event.ToolCallID, ToolName: event.ToolName, Arguments: event.Arguments})
+			arguments := argumentsByCallID[event.ToolCallID]
+			result.ToolSteps = append(result.ToolSteps, ToolStep{ToolCallID: event.ToolCallID, ToolName: event.ToolName, Arguments: arguments})
 		case session.ToolExecutionEndEvent:
 			stepIndex, ok := stepByCallID[event.ToolCallID]
 			if !ok {
@@ -610,18 +637,23 @@ func collectRunResult(events <-chan session.Event) (RunResult, error) {
 				stepByCallID[event.ToolCallID] = stepIndex
 				result.ToolSteps = append(result.ToolSteps, ToolStep{ToolCallID: event.ToolCallID, ToolName: event.Result.ToolName})
 			}
-			if event.Error != nil {
-				result.ToolSteps[stepIndex].Error = event.Error.Error()
-			} else if event.Result.IsError {
-				result.ToolSteps[stepIndex].Error = event.Result.Content
-			} else {
+			if event.Status == agent.ToolResultSuccess {
 				result.ToolSteps[stepIndex].Result = event.Result.Content
+			} else {
+				result.ToolSteps[stepIndex].Error = event.Result.Content
 			}
 		case session.MessageEndEvent:
+			for _, call := range event.Message.ToolCalls {
+				argumentsByCallID[call.ID] = call.Function.Arguments
+			}
 			if len(event.Message.ToolCalls) == 0 {
 				result.Answer = event.Message.Content
 			}
-		case session.ErrorEvent:
+		case session.RunFailedEvent:
+			if event.Error != nil {
+				return result, event.Error
+			}
+		case session.RunCanceledEvent:
 			if event.Error != nil {
 				return result, event.Error
 			}
