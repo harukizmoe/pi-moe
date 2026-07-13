@@ -20,6 +20,8 @@ type Options struct {
 	BaseSystemPrompt string
 	// SessionPrompt 是当前 session 的行为设定，会追加在基础系统指令之后。
 	SessionPrompt string
+	// Context 配置每次 Provider 调用前的预算估算、完整 turn 裁剪和显式压缩策略。
+	Context ContextOptions
 }
 
 // Agent 负责驱动一次基于事件流的 tool calling 主循环。
@@ -31,6 +33,7 @@ type Agent struct {
 	maxSteps      int
 	basePrompt    string
 	sessionPrompt string
+	context       contextPolicy
 }
 
 // New 创建一个绑定固定 Provider、工具注册表和模型名的 Agent。
@@ -67,5 +70,6 @@ func NewWithOptions(provider llms.Provider, registry *tools.Registry, model stri
 		maxSteps:      maxSteps,
 		basePrompt:    basePrompt,
 		sessionPrompt: sessionPrompt,
+		context:       newContextPolicy(opts.Context),
 	}
 }

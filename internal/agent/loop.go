@@ -76,16 +76,24 @@ func (a *Agent) stream(ctx context.Context, messages []Message, stream chan Even
 	}
 
 	for chatRound := 0; ; chatRound++ {
-		llmMessages, err := toLLMMessagesWithPrompts(messages, a.basePrompt, a.sessionPrompt)
+		// 每轮 tool loop 都从当前 transcript 重新准备上下文；上一轮新增的
+		// assistant/tool-result 会立即参与预算，避免只在 Run 开始时检查一次。
+		prepared, err := a.context.prepare(ctx, messages, combineProviderPrompts(a.basePrompt, a.sessionPrompt), toolSchemas)
 		if err != nil {
 			emit(ErrorEvent{RunID: runID, Error: err})
 			return
 		}
-		a.logLLMRequest(ctx, chatRound, len(llmMessages), len(toolSchemas))
+		if a.context.enabled() {
+			prepared.event.RunID = runID
+			if !emit(prepared.event) {
+				return
+			}
+		}
+		a.logLLMRequest(ctx, chatRound, len(prepared.messages), len(toolSchemas))
 		messageID := fmt.Sprintf("%s-assistant-%d", runID, chatRound+1)
 		assistantMessage, err := a.runChatRound(ctx, emit, runID, messageID, chatRound, llms.ChatRequest{
 			Model:    a.model,
-			Messages: llmMessages,
+			Messages: prepared.messages,
 			Tools:    toolSchemas,
 		})
 		if err != nil {
